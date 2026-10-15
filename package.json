@@ -1,0 +1,22 @@
+{
+  "name": "@huntingrin/xhs-opportunity-kit",
+  "version": "0.1.0",
+  "description": "Local-first Xiaohongshu opportunity SDK, JSON CLI, MCP server and portable agent skill.",
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=22.13.0" },
+  "bin": { "xhs-opportunity": "dist/cli.js", "xhs-opportunity-mcp": "dist/mcp-server.js" },
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "files": ["dist", "skills", "examples", "docs", "README.md", "LICENSE"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test tests/core.test.mjs tests/interfaces.test.mjs",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "prepare": "npm run build",
+    "prepack": "npm run build"
+  },
+  "dependencies": { "@modelcontextprotocol/sdk": "^1.32.1", "zod": "^3.25.76" },
+  "devDependencies": { "@types/node": "^22.19.0", "typescript": "^5.9.3" },
+  "repository": { "type": "git", "url": "git+https://github.com/huntingrin/xhs-opportunity-kit.git" },
+  "bugs": { "url": "https://github.com/huntingrin/xhs-opportunity-kit/issues" }
+}

@@ -1,0 +1,9 @@
+# Working on this repository
+
+This is a standalone, local-first SDK/CLI/MCP package. Keep business logic in the SDK and reuse it from CLI and MCP. Public entry points are exported from `src/index.ts`; runtime input validation must also protect JavaScript callers.
+
+Run `npm test` and `npm run check` for code changes. Tests use synthetic fixtures and temporary databases. Do not send real messages or start schedulers as tests. Live read-only provider checks need an existing usable session and must keep account data outside this repository.
+
+Never commit provider credentials, raw account responses, actual lead lists or runtime databases. Keep fixture data obviously synthetic. Preserve uncertainty, partial results and evidence provenance. Do not report unknown search coverage as complete or stale judgments as current.
+
+Use explicit package files for release contents; verify `npm pack --dry-run` before publication. Runtime state belongs to the OS data directory or the caller's `--db` path. This repository does not own adjacent projects or the future parent repository.

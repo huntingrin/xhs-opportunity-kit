@@ -1,0 +1,1 @@
+{"provider":{"type":"mcp","transport":"streamable-http","url":"http://127.0.0.1:18060/mcp","bearerTokenEnv":"XHS_MCP_TOKEN","timeoutMs":30000},"options":{"keywords":["急需 剪辑"],"maxPagesPerKeyword":1,"maxDetails":2}}
