@@ -4,19 +4,52 @@
   "description": "Local-first Xiaohongshu opportunity SDK, JSON CLI, MCP server and portable agent skill.",
   "type": "module",
   "license": "MIT",
-  "engines": { "node": ">=22.13.0" },
-  "bin": { "xhs-opportunity": "dist/cli.js", "xhs-opportunity-mcp": "dist/mcp-server.js" },
-  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
-  "files": ["dist", "skills", "examples", "docs", "README.md", "LICENSE"],
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "bin": {
+    "xhs-opportunity": "dist/cli.js",
+    "xhs-opportunity-mcp": "dist/mcp-server.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "skills",
+    "!skills/xhs-opportunity-kit/scripts",
+    "!skills/xhs-opportunity-kit/THIRD-PARTY.md",
+    "examples",
+    "docs",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "bundle:skill": "npm run build && node scripts/bundle-skill.mjs",
     "test": "npm run build && node --test tests/core.test.mjs tests/interfaces.test.mjs",
     "check": "tsc -p tsconfig.json --noEmit",
+    "check:bundle": "npm run bundle:skill && git diff --exit-code -- skills/xhs-opportunity-kit/scripts",
     "prepare": "npm run build",
     "prepack": "npm run build"
   },
-  "dependencies": { "@modelcontextprotocol/sdk": "^1.32.1", "zod": "^3.25.76" },
-  "devDependencies": { "@types/node": "^22.19.0", "typescript": "^5.9.3" },
-  "repository": { "type": "git", "url": "git+https://github.com/huntingrin/xhs-opportunity-kit.git" },
-  "bugs": { "url": "https://github.com/huntingrin/xhs-opportunity-kit/issues" }
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/huntingrin/xhs-opportunity-kit.git"
+  },
+  "bugs": {
+    "url": "https://github.com/huntingrin/xhs-opportunity-kit/issues"
+  }
 }

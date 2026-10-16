@@ -10,15 +10,30 @@
 
 需要 **Node.js 22.13 或以上**。使用 Node 内置 SQLite，无需另外安装数据库。部分 Node 版本会向 stderr 输出 SQLite 实验性提示，stdout 仍是纯 JSON。
 
-安装 GitHub Release 中的已编译包（无需 TypeScript 编译器）：
+### 方式一：直接用技能目录里的单文件 CLI（无需任何安装）
+
+`skills/xhs-opportunity-kit/scripts/` 下的两个入口是**已内联依赖的构建产物**，只需 Node，不需 npm 安装、不产生 node_modules、可离线运行：
 
 ```sh
-npm install -g https://github.com/huntingrin/xhs-opportunity-kit/releases/download/v0.1.0/huntingrin-xhs-opportunity-kit-0.1.0.tgz
+node skills/xhs-opportunity-kit/scripts/xhs-opportunity.mjs doctor
+node skills/xhs-opportunity-kit/scripts/xhs-opportunity-mcp.mjs --db /absolute/path/to/opportunities.sqlite
+```
+
+它们由 `npm run bundle:skill` 生成并随仓库提交，见 [Agent Skill](skills/xhs-opportunity-kit/SKILL.md) 与 [第三方声明](skills/xhs-opportunity-kit/THIRD-PARTY.md)。
+
+### 方式二：安装 GitHub Release 中的已编译包
+
+```sh
+curl -L -o huntingrin-xhs-opportunity-kit-0.1.0.tgz \
+  https://github.com/huntingrin/xhs-opportunity-kit/releases/download/v0.1.0/huntingrin-xhs-opportunity-kit-0.1.0.tgz
+npm install -g ./huntingrin-xhs-opportunity-kit-0.1.0.tgz
 xhs-opportunity --help
 xhs-opportunity doctor
 ```
 
-源码开发：
+**先下载再本地安装，是因为 npm 12 默认拒绝直接安装远程 URL**（`allow-remote` 默认为 `none`，会报 `EALLOWREMOTE`）。旧版 npm 可以直接 `npm install -g <上面的 tgz URL>`；也可以给 npm 12 加 `--allow-remote` 放行。发布包内已含编译好的 `dist/`，安装脚本被策略拦截（npm 12 默认拦 `prepare`）不影响使用。同目录的 `SHA256SUMS` 可用于校验下载。
+
+### 方式三：源码开发
 
 ```sh
 git clone https://github.com/huntingrin/xhs-opportunity-kit.git
@@ -26,6 +41,7 @@ cd xhs-opportunity-kit
 npm ci
 npm test
 node examples/quickstart.mjs
+npm run bundle:skill   # 改过 src/ 后重新生成技能内置入口
 ```
 
 目前通过 GitHub 分发，**尚未发布 npm registry 包**。不要使用 `npm install @huntingrin/xhs-opportunity-kit`，除非你确认它日后已在 registry 发布。其他 Node 项目可以 `npm install <上面的 tgz URL>` 后导入同名 SDK。
@@ -34,10 +50,10 @@ node examples/quickstart.mjs
 
 | 环境能力 | 接入方式 |
 | --- | --- |
-| 能执行命令 | 调用 `xhs-opportunity`，通过文件或 stdin 传 JSON，解析 JSON 结果 |
-| 支持 MCP | 启动 `xhs-opportunity-mcp`，发现并调用 10 个标准工具 |
+| 能执行命令 | 调用 `xhs-opportunity`，或技能目录里的单文件 CLI，通过文件或 stdin 传 JSON，解析 JSON 结果 |
+| 支持 MCP | 启动 `xhs-opportunity-mcp`，或在技能目录里用 `node scripts/xhs-opportunity-mcp.mjs`，发现并调用 10 个标准工具 |
 | 能运行 JS/TS | 导入 SDK，注入自己的数据提供器 |
-| 支持 Skill | 加载 `skills/xhs-opportunity-kit/SKILL.md`，作为工作流指南 |
+| 支持 Skill | 加载 `skills/xhs-opportunity-kit/SKILL.md`，作为工作流指南；包内 CLI 可直接运行 |
 | 只有聊天、不能调用工具 | 不能直接执行本项目；需由宿主提供以上一种执行能力 |
 
 CLI 是跨 Agent 的基础入口；Skill 不绑定 Codex、Cola 或特定模型。小红书登录和连接需要由使用者自行配置，不随安装包分发。没有平台连接也能处理已有数据。
@@ -115,7 +131,10 @@ Agent 已经能读取小红书、但不能让本包直接连接同一工具时�
 ```sh
 npm run check
 npm test
+npm run bundle:skill   # 重新生成技能内置入口与第三方声明
 npm pack
 ```
+
+`skills/xhs-opportunity-kit/scripts/` 与 `THIRD-PARTY.md` 是 `npm run bundle:skill` 的生成产物，**随仓库提交**（技能包没有安装步骤，必须自带依赖）。改过 `src/` 后请重新生成并一并提交；`npm run check:bundle` 会校验产物是否与源码同步。
 
 合成测试覆盖核心业务行为、CLI 子进程和真实 MCP 协议连接。CI 验证 Linux / macOS / Windows 与多个 Node 版本。线上功能是否可用仍取决于使用者的 MCP 服务与平台会话。MIT License。
