@@ -27,7 +27,7 @@ Exit codes:
 - `1`: validation, configuration, storage or other execution error; `{ok:false,error:{code,message}}`.
 - `3`: collect returned partial/failed; `{ok:true,data:{status,...}}`. This distinguishes an executed but incomplete collection from CLI failure. Preserve saved results and surface warnings/errors.
 
-Errors include VALIDATION_ERROR, NOT_FOUND, INVALID_TRANSITION, UNKNOWN_EVIDENCE, PROVIDER_REQUIRED, PROVIDER_CONNECT_FAILED, PROVIDER_CALL_FAILED, PROVIDER_SHAPE, TIMEOUT, CURSOR_LOOP. Unexpected errors are summarized instead of reflecting upstream credentials or raw output.
+Errors include VALIDATION_ERROR, NOT_FOUND, INVALID_TRANSITION, UNKNOWN_EVIDENCE, INPUT_UNREADABLE (the `--input` path could not be read; pass a readable JSON file or `-` for stdin), PROVIDER_REQUIRED, PROVIDER_CONNECT_FAILED, PROVIDER_CALL_FAILED, PROVIDER_SHAPE, TIMEOUT, CURSOR_LOOP. Unexpected errors are summarized instead of reflecting upstream credentials or raw output.
 
 For SDK callers, `execute(store, command, input, optionalProvider)` implements the same commands. It returns the data payload and throws errors; wrap with `publicError` for the CLI-shaped error envelope.
 

@@ -16,7 +16,10 @@ async function readInput(path?: string): Promise<unknown> {
       if (size > 20 * 1024 * 1024) throw new KitError('INPUT_TOO_LARGE', 'Input exceeds 20 MiB.'); chunks.push(b);
     }
     text = Buffer.concat(chunks).toString('utf8');
-  } else text = await readFile(path, 'utf8');
+  } else {
+    try { text = await readFile(path, 'utf8'); }
+    catch { throw new KitError('INPUT_UNREADABLE', `Cannot read input file: ${path}. Pass a readable JSON file path, or "-" to read the request from stdin.`); }
+  }
   if (Buffer.byteLength(text) > 20 * 1024 * 1024) throw new KitError('INPUT_TOO_LARGE', 'Input exceeds 20 MiB.');
   try { return JSON.parse(text); } catch { throw new KitError('INVALID_JSON', 'Input must be valid JSON.'); }
 }

@@ -23,6 +23,14 @@ test('CLI supports stdin JSON, repeatable import, list, export, errors and no ov
   assert.equal(cli(db, 'export', { format: 'csv' }, ['--output', csv]).status, 1);
   const missing = cli(db, 'show', { key: 'absent' }); assert.equal(missing.status, 1); assert.equal(missing.json.error.code, 'NOT_FOUND');
 });
+test('CLI names an unreadable input file instead of a generic failure', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'xhs-cli-input-')); t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const r = spawnSync(process.execPath, ['dist/cli.js', 'list', '--db', join(dir, 'state.sqlite'), '--input', join(dir, 'absent.json')], { encoding: 'utf8' });
+  assert.equal(r.status, 1);
+  const json = JSON.parse(r.stdout);
+  assert.equal(json.ok, false); assert.equal(json.error.code, 'INPUT_UNREADABLE');
+  assert.ok(json.error.message.includes('absent.json'));
+});
 test('CLI real file-provider collection and partial exit code', t => {
   const dir = mkdtempSync(join(tmpdir(), 'xhs-collect-')); t.after(() => rmSync(dir, { recursive: true, force: true }));
   const r = cli(join(dir, 'state.sqlite'), 'collect', { provider: { type: 'file', path: 'examples/notes.json', pageSize: 1 },
