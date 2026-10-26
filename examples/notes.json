@@ -1,7 +1,7 @@
 {
   "notes": [
-    { "id": "synthetic-edit-001", "title": "示例：短视频剪辑需求", "body": "合成测试数据。需要剪辑一条产品视频，预算 800 元，接受 AI 辅助。", "observedAt": "2026-10-01T10:00:00Z", "publishedAt": "2026-10-01T00:00:00Z" },
-    { "id": "synthetic-edit-002", "title": "示例：剪辑项目，预算待沟通", "body": "合成测试数据。需要剪辑，尚未说明预算和 AI 使用要求。", "observedAt": "2026-10-01T10:00:00Z" },
-    { "id": "synthetic-design-003", "title": "示例：设计服务展示", "body": "合成测试数据。这是一条供给方服务广告，需要审阅后排除。", "observedAt": "2026-10-01T10:00:00Z" }
+    { "id": "synthetic-remote-001", "title": "示例：远程短视频剪辑需求", "body": "合成测试数据。需要远程剪辑一条产品视频，15 元/条，每月 400 条起，预算 6000 元/月，接受 AI 辅助。", "observedAt": "2026-10-01T10:00:00Z", "publishedAt": "2026-10-01T00:00:00Z" },
+    { "id": "synthetic-remote-002", "title": "示例：远程剪辑项目，单价待沟通", "body": "合成测试数据。远程剪辑，尚未说明单价、工作量和 AI 使用要求。", "observedAt": "2026-10-01T10:00:00Z", "publishedAt": "2026-10-01T00:00:00Z" },
+    { "id": "synthetic-design-003", "title": "示例：设计服务展示", "body": "合成测试数据。这是一条供给方服务广告，需要审阅后排除。", "observedAt": "2026-10-01T10:00:00Z", "publishedAt": "2026-10-01T00:00:00Z" }
   ]
 }

@@ -4,13 +4,14 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { OpportunityStore, importNotes, parseNote, normalizeFeed, collect, FileProvider, McpProvider,
-  unwrapMcp, screen, exportCsv, execute } from '../dist/index.js';
+  unwrapMcp, screen, summarizeScreen, exportCsv, buildReport, execute } from '../dist/index.js';
 
 const at = '2026-10-01T10:00:00.000Z';
 const note = (id = 'demo1', overrides = {}) => ({ id, title: '剪辑需求', body: '需要剪辑，预算 800 元。接受 AI 辅助。', observedAt: at, ...overrides });
 function storeFor(t) { const s = new OpportunityStore(':memory:'); t.after(() => s.close()); return s; }
 function reviewFor(o, overrides = {}) { return { decision: 'priority', reason: '原帖明确需要制作且接受 AI',
-  reviewer: 'test-agent', evidenceIds: [o.evidence[0].id], demandType: 'buyer', aiAcceptance: 'accepted', budget: 800, ...overrides }; }
+  reviewer: 'test-agent', evidenceIds: [o.evidence[0].id], demandType: 'buyer', workMode: 'remote',
+  aiAcceptance: 'accepted', budget: 800, ...overrides }; }
 
 test('ingestion is idempotent, preserves evidence and canonicalizes URLs', t => {
   const s = storeFor(t); assert.equal(s.ingest([note()]).inserted, 1);
@@ -140,4 +141,108 @@ test('query dispatch rejects unknown arguments and bounds pagination', async t =
   const s = storeFor(t); await assert.rejects(() => execute(s, 'list', { limit: -1 }));
   await assert.rejects(() => execute(s, 'stage', { key: 'x', stage: 'closed', reason: 'done', send: true }));
   assert.equal((await execute(s, 'doctor', {})).sendsMessages, false);
+});
+test('remote screening separates confirmed, hybrid, onsite and unknown work', t => {
+  const s = storeFor(t); const modes = { demoR: 'remote', demoH: 'hybrid', demoO: 'onsite', demoU: 'unknown' };
+  for (const [id, mode] of Object.entries(modes)) {
+    s.ingest([note(id)]); const o = s.get(`xiaohongshu:${id}`); s.review(o.key, reviewFor(o, { workMode: mode }));
+  }
+  const items = s.list().map(o => screen(o, { requireRemote: true }));
+  const byKey = Object.fromEntries(items.map(item => [item.key, item]));
+  assert.equal(byKey['xiaohongshu:demoR'].result, 'match');
+  assert.equal(byKey['xiaohongshu:demoH'].result, 'pending');
+  assert.ok(byKey['xiaohongshu:demoH'].reasons.includes('HYBRID'));
+  assert.equal(byKey['xiaohongshu:demoO'].result, 'excluded');
+  assert.ok(byKey['xiaohongshu:demoO'].reasons.includes('ONSITE'));
+  assert.equal(byKey['xiaohongshu:demoU'].result, 'pending');
+  assert.ok(byKey['xiaohongshu:demoU'].reasons.includes('REMOTE_UNVERIFIED'));
+  const summary = summarizeScreen(items);
+  assert.equal(summary.match, 1); assert.equal(summary.pending, 2); assert.equal(summary.excluded, 1);
+  assert.equal(summary.workModes.remote, 1); assert.equal(summary.workModes.onsite, 1);
+  assert.equal(summary.reasons.ONSITE, 1);
+});
+test('old reviews without work mode remain pending under a remote requirement', t => {
+  const s = storeFor(t); s.ingest([note()]); const o = s.get('xiaohongshu:demo1');
+  const old = { ...o, review: { decision: 'priority', reason: 'old review', evidenceIds: [o.evidence[0].id],
+    reviewer: 'old-agent', demandType: 'buyer', aiAcceptance: 'accepted', budget: 800, currency: 'CNY' } };
+  const result = screen(old, { requireRemote: true });
+  assert.equal(result.workMode, 'unknown'); assert.equal(result.result, 'pending');
+  assert.ok(result.reasons.includes('REMOTE_UNVERIFIED'));
+});
+test('rate, demand type and risk flags are recorded and can be screened', t => {
+  const s = storeFor(t); s.ingest([note()]); let o = s.get('xiaohongshu:demo1');
+  o = s.review(o.key, reviewFor(o, { demandType: 'agency', budget: 1500,
+    rate: { min: 15, max: 25, unit: 'per_item', volume: '2 条/天' }, riskFlags: ['agency_cut'] }));
+  assert.equal(o.review.rate.unit, 'per_item'); assert.equal(o.review.rate.max, 25);
+  const risk = screen(o, { excludeRiskFlags: ['agency_cut'] });
+  assert.equal(risk.result, 'excluded'); assert.ok(risk.reasons.includes('RISK_FLAG'));
+  const intermediary = screen(o, { excludeIntermediaries: true });
+  assert.equal(intermediary.result, 'excluded'); assert.ok(intermediary.reasons.includes('INTERMEDIARY'));
+  assert.equal(screen(o, {}).result, 'match');
+  const range = screen(o, { minRate: 20, rateUnit: 'per_item' });
+  assert.equal(range.result, 'pending'); assert.ok(range.reasons.includes('RATE_RANGE'));
+  const low = screen(o, { minRate: 30, rateUnit: 'per_item' });
+  assert.equal(low.result, 'excluded'); assert.ok(low.reasons.includes('RATE_TOO_LOW'));
+  assert.equal(screen(o, { minRate: 10, rateUnit: 'per_item' }).result, 'match');
+  assert.ok(screen(o, { minRate: 10, rateUnit: 'per_month' }).reasons.includes('RATE_UNIT_MISMATCH'));
+  assert.throws(() => screen(o, { minRate: 10 }));
+  const bare = storeFor(t); bare.ingest([note('bare')]); const bareOpp = bare.get('xiaohongshu:bare');
+  const bareReviewed = bare.review(bareOpp.key, reviewFor(bareOpp, { rate: null }));
+  assert.ok(screen(bareReviewed, { minRate: 10, rateUnit: 'per_item' }).reasons.includes('RATE_UNKNOWN'));
+  const fixed = storeFor(t); fixed.ingest([note('fixed')]); const fixedOpp = fixed.get('xiaohongshu:fixed');
+  const fixedReviewed = fixed.review(fixedOpp.key, reviewFor(fixedOpp, { rate: { min: 15, max: 15, unit: 'per_item' } }));
+  assert.equal(screen(fixedReviewed, { minRate: 20, rateUnit: 'per_item' }).result, 'excluded');
+  const open = storeFor(t); open.ingest([note('open')]); const openOpp = open.get('xiaohongshu:open');
+  const openReviewed = open.review(openOpp.key, reviewFor(openOpp, { rate: { min: 15, unit: 'per_item' } }));
+  assert.equal(screen(openReviewed, { minRate: 20, rateUnit: 'per_item' }).result, 'pending');
+  assert.throws(() => s.review(o.key, reviewFor(o, { rate: { min: 25, max: 15, unit: 'per_item' } })));
+});
+test('max age filters old or undated posts without assuming freshness', t => {
+  const s = storeFor(t); const now = Date.parse('2026-10-26T00:00:00.000Z');
+  s.ingest([note('recent', { publishedAt: '2026-10-24T00:00:00.000Z' }),
+    note('old', { publishedAt: '2026-10-01T00:00:00.000Z' }), note('undated', { publishedAt: null })]);
+  for (const id of ['recent', 'old', 'undated']) {
+    const o = s.get(`xiaohongshu:${id}`); s.review(o.key, reviewFor(o));
+  }
+  assert.equal(screen(s.get('xiaohongshu:recent'), { maxAgeDays: 7 }, now).result, 'match');
+  const old = screen(s.get('xiaohongshu:old'), { maxAgeDays: 7 }, now);
+  assert.equal(old.result, 'excluded'); assert.ok(old.reasons.includes('TOO_OLD'));
+  const undated = screen(s.get('xiaohongshu:undated'), { maxAgeDays: 7 }, now);
+  assert.equal(undated.result, 'pending'); assert.ok(undated.reasons.includes('DATE_UNKNOWN'));
+});
+test('show returns readable quotes; doctor returns plain checks; screen aggregates reasons', async t => {
+  const s = storeFor(t); await execute(s, 'import', { document: { notes: [note()] } });
+  const shown = await execute(s, 'show', { key: 'xiaohongshu:demo1' });
+  assert.equal(shown.quotes[0].text, note().body); assert.equal(shown.quotes[0].kind, 'note');
+  const doctor = await execute(s, 'doctor', {});
+  assert.ok(Array.isArray(doctor.checks)); assert.equal(doctor.checks.find(c => c.id === 'storage').status, 'ok');
+  assert.equal(doctor.checks.find(c => c.id === 'provider').status, 'attention');
+  const item = s.get('xiaohongshu:demo1'); s.review(item.key, reviewFor(item, { workMode: 'onsite' }));
+  const screened = await execute(s, 'screen', { criteria: { requireRemote: true } });
+  assert.equal(screened.summary.excluded, 1); assert.equal(screened.summary.reasons.ONSITE, 1);
+  assert.ok(screened.criteria.requireRemote);
+});
+test('CSV carries work mode, rate and risk columns in English or Chinese', t => {
+  const s = storeFor(t); s.ingest([note()]); const o = s.get('xiaohongshu:demo1');
+  s.review(o.key, reviewFor(o, { rate: { min: 15, unit: 'per_item', volume: '400 条/月' }, riskFlags: ['unclear_rate'] }));
+  const en = exportCsv(s.list()); const zh = exportCsv(s.list(), 'zh');
+  assert.ok(en.includes('"work_mode"')); assert.ok(en.includes('"rate_min"')); assert.ok(en.includes('"risk_flags"'));
+  assert.ok(en.includes('"remote"')); assert.ok(en.includes('"per_item"')); assert.ok(en.includes('"unclear_rate"'));
+  assert.ok(zh.startsWith('"记录ID"')); assert.ok(zh.includes('"工作方式"'));
+  assert.ok(zh.includes('"远程"')); assert.ok(zh.includes('"元/条"')); assert.ok(zh.includes('"单价不清"'));
+});
+test('HTML report escapes post text and separates recommendation from pending', t => {
+  const s = storeFor(t); s.ingest([note('xss', { title: '<script>alert(1)</script>', body: '远程合作，<img src=x onerror=1>' })]);
+  const o = s.get('xiaohongshu:xss'); s.review(o.key, reviewFor(o));
+  const report = buildReport(s.list(), { criteria: { requireRemote: true } });
+  assert.ok(report.html.includes('&lt;script&gt;')); assert.ok(!report.html.includes('<script>alert(1)</script>'));
+  assert.ok(report.html.includes('建议先联系')); assert.equal(report.summary.match, 1);
+  assert.ok(buildReport(s.list(), { criteria: { requireRemote: true }, locale: 'en' }).html.includes('Recommended'));
+});
+test('demo report is synthetic and never touches the caller database', async t => {
+  const s = storeFor(t); const demo = await execute(s, 'demo', {});
+  assert.equal(demo.demo, true); assert.equal(demo.count, 5); assert.equal(demo.summary.match, 2);
+  assert.ok(demo.data.includes('示例')); assert.ok(!demo.data.includes('<script')); assert.equal(s.count(), 0);
+  const report = await execute(s, 'report', {});
+  assert.equal(report.format, 'html'); assert.ok(report.data.includes('<!doctype html>'));
 });

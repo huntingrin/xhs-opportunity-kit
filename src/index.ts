@@ -4,5 +4,6 @@ export * from './providers.js';
 export * from './importer.js';
 export * from './workflows.js';
 export * from './exporter.js';
+export * from './report.js';
 export * from './api.js';
 export * from './paths.js';

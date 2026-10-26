@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -21,6 +21,8 @@ test('CLI supports stdin JSON, repeatable import, list, export, errors and no ov
   const csv = join(dir, 'out.csv'); assert.equal(cli(db, 'export', { format: 'csv' }, ['--output', csv]).status, 0);
   assert.ok(readFileSync(csv, 'utf8').includes('剪辑'));
   assert.equal(cli(db, 'export', { format: 'csv' }, ['--output', csv]).status, 1);
+  const zh = join(dir, 'zh.csv'); assert.equal(cli(db, 'export', { format: 'csv', header: 'zh' }, ['--output', zh]).status, 0);
+  assert.ok(readFileSync(zh, 'utf8').startsWith('"记录ID"'));
   const missing = cli(db, 'show', { key: 'absent' }); assert.equal(missing.status, 1); assert.equal(missing.json.error.code, 'NOT_FOUND');
 });
 test('CLI names an unreadable input file instead of a generic failure', t => {
@@ -30,6 +32,20 @@ test('CLI names an unreadable input file instead of a generic failure', t => {
   const json = JSON.parse(r.stdout);
   assert.equal(json.ok, false); assert.equal(json.error.code, 'INPUT_UNREADABLE');
   assert.ok(json.error.message.includes('absent.json'));
+});
+test('CLI writes HTML reports and demo output without touching the demo database', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'xhs-report-')); t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const demoDb = join(dir, 'demo.sqlite'); const demoFile = join(dir, 'demo.html');
+  const demo = cli(demoDb, 'demo', {}, ['--output', demoFile]);
+  assert.equal(demo.status, 0); assert.ok(existsSync(demoFile));
+  assert.ok(readFileSync(demoFile, 'utf8').includes('示例'));
+  assert.equal(existsSync(demoDb), false);
+  const reportDb = join(dir, 'state.sqlite'); const reportFile = join(dir, 'report.html');
+  cli(reportDb, 'import', { document: { notes: [{ id: 'report1', title: '远程剪辑', observedAt: '2026-10-01T00:00:00Z' }] } });
+  const report = cli(reportDb, 'report', {}, ['--output', reportFile]);
+  assert.equal(report.status, 0); assert.ok(readFileSync(reportFile, 'utf8').includes('<!doctype html>'));
+  const inline = cli(reportDb, 'report', {});
+  assert.equal(inline.json.data.htmlLength > 100, true); assert.equal('data' in inline.json.data, false);
 });
 test('CLI real file-provider collection and partial exit code', t => {
   const dir = mkdtempSync(join(tmpdir(), 'xhs-collect-')); t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -42,12 +58,16 @@ test('MCP server exposes working standard tools and blocks model-supplied provid
   const transport = new StdioClientTransport({ command: process.execPath, args: [resolve('dist/mcp-server.js'), '--db', join(dir, 'state.sqlite')], stderr: 'ignore' });
   t.after(async () => { await client.close(); rmSync(dir, { recursive: true, force: true }); });
   await client.connect(transport);
-  const tools = await client.listTools(); assert.equal(tools.tools.length, 10);
+  const tools = await client.listTools(); assert.equal(tools.tools.length, 12);
   assert.ok(!('provider' in tools.tools.find(x => x.name === 'opportunity_collect').inputSchema.properties));
   const imported = await client.callTool({ name: 'opportunity_import', arguments: { document: { notes: [{ id: 'mcp1', title: '虚构需求', observedAt: '2026-10-01T00:00:00Z' }] } } });
   assert.equal(JSON.parse(imported.content[0].text).data.inserted, 1);
   const listed = await client.callTool({ name: 'opportunity_list', arguments: {} });
   assert.equal(JSON.parse(listed.content[0].text).data.items[0].key, 'xiaohongshu:mcp1');
+  const report = await client.callTool({ name: 'opportunity_report', arguments: {} });
+  assert.ok(JSON.parse(report.content[0].text).data.data.includes('<!doctype html>'));
+  const demo = await client.callTool({ name: 'opportunity_demo', arguments: {} });
+  assert.equal(JSON.parse(demo.content[0].text).data.demo, true);
   const failed = await client.callTool({ name: 'opportunity_collect', arguments: { options: { keywords: ['test'] } } });
   assert.equal(failed.isError, true);
 });

@@ -19,6 +19,8 @@ const descriptions: Record<Command, string> = {
   stage: 'Record a business stage transition with a reason. This only changes the local record, not the platform.',
   screen: 'Filter saved opportunities; unknown facts remain pending, never assumed true.',
   export: 'Return JSON or spreadsheet-safe CSV text for a selected page of opportunities.',
+  report: 'Render a standalone HTML report from local records. Does not send or publish anything.',
+  demo: 'Render a synthetic demo report in memory; does not touch the user database.',
   collect: 'Read search results from the host-configured provider. Does not send, publish or start a scheduler.',
   run: 'Read a saved collection run, including partial failures.',
   doctor: 'Report local SDK/storage capabilities; does not verify platform login.',
@@ -34,7 +36,7 @@ try {
     const schema = name === 'collect' ? z.object({ options: collectSchema }).strict() : commandSchemas[name];
     server.registerTool(`opportunity_${name}`, {
       description: descriptions[name], inputSchema: schema.shape,
-      annotations: { readOnlyHint: ['list', 'show', 'screen', 'export', 'run', 'doctor'].includes(name),
+      annotations: { readOnlyHint: ['list', 'show', 'screen', 'export', 'report', 'demo', 'run', 'doctor'].includes(name),
         destructiveHint: false, openWorldHint: name === 'collect' },
     }, async (input: unknown) => {
       try {

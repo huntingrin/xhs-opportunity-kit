@@ -1,1 +1,1 @@
-{"provider":{"type":"file","path":"examples/notes.json","pageSize":1},"options":{"keywords":["剪辑"],"maxPagesPerKeyword":3}}
+{"provider":{"type":"file","path":"examples/notes.json","pageSize":1},"options":{"keywords":["远程剪辑","线上剪辑"],"maxPagesPerKeyword":3}}

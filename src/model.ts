@@ -8,6 +8,17 @@ export const timestamp = z.string().datetime({ offset: true });
 export const idSchema = z.string().min(1).max(128).regex(/^[a-zA-Z0-9_-]+$/);
 export const stageSchema = z.enum(['discovered', 'contacted', 'requirements_review', 'accepted', 'delivered', 'closed']);
 export const decisionSchema = z.enum(['priority', 'pending', 'excluded']);
+export const workModeSchema = z.enum(['remote', 'hybrid', 'onsite', 'unknown']);
+export const demandTypeSchema = z.enum(['buyer', 'agency', 'recruiter', 'seller', 'unknown']);
+export const rateUnitSchema = z.enum(['per_item', 'per_minute', 'per_hour', 'per_day', 'per_month', 'per_project', 'unknown']);
+export const riskFlagSchema = z.enum(['deposit', 'training_fee', 'unpaid_trial', 'unclear_rate',
+  'unrealistic_volume', 'off_platform_payment', 'account_access', 'stale_post', 'agency_cut', 'other']);
+export const rateSchema = z.object({
+  min: z.number().nonnegative().finite(),
+  max: z.number().nonnegative().finite().nullable().default(null),
+  unit: rateUnitSchema.default('unknown'),
+  volume: z.string().max(200).default(''),
+}).strict().refine(v => v.max == null || v.max >= v.min, 'Rate max must be at least min.');
 export const evidenceSchema = z.object({
   kind: z.enum(['note', 'comment', 'image_text', 'profile', 'historical_review']),
   text: z.string().min(1).max(20000),
@@ -35,12 +46,19 @@ export const reviewSchema = z.object({
   evidenceIds: z.array(z.string().min(1)).min(1).max(1000),
   reviewer: z.string().min(1).max(200),
   aiAcceptance: z.enum(['accepted', 'rejected', 'unknown']).default('unknown'),
-  demandType: z.enum(['buyer', 'seller', 'unknown']).default('unknown'),
+  demandType: demandTypeSchema.default('unknown'),
+  workMode: workModeSchema.default('unknown'),
+  rate: rateSchema.nullable().default(null),
+  riskFlags: z.array(riskFlagSchema).max(20).default([]),
   budget: z.number().nonnegative().finite().nullable().default(null),
   currency: z.string().length(3).default('CNY'),
 }).strict();
 export type ReviewInput = z.input<typeof reviewSchema>;
 export type Review = z.output<typeof reviewSchema> & { reviewedAt: string; snapshotHash: string };
+export type WorkMode = z.infer<typeof workModeSchema>;
+export type DemandType = z.infer<typeof demandTypeSchema>;
+export type Rate = z.infer<typeof rateSchema>;
+export type RiskFlag = z.infer<typeof riskFlagSchema>;
 export interface Opportunity {
   key: string; url: string; note: Note; evidence: Evidence[];
   firstSeenAt: string; lastSeenAt: string; snapshotHash: string;

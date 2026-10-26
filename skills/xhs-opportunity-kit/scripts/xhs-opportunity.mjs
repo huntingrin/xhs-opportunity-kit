@@ -11884,6 +11884,27 @@ var timestamp = external_exports.string().datetime({ offset: true });
 var idSchema = external_exports.string().min(1).max(128).regex(/^[a-zA-Z0-9_-]+$/);
 var stageSchema = external_exports.enum(["discovered", "contacted", "requirements_review", "accepted", "delivered", "closed"]);
 var decisionSchema = external_exports.enum(["priority", "pending", "excluded"]);
+var workModeSchema = external_exports.enum(["remote", "hybrid", "onsite", "unknown"]);
+var demandTypeSchema = external_exports.enum(["buyer", "agency", "recruiter", "seller", "unknown"]);
+var rateUnitSchema = external_exports.enum(["per_item", "per_minute", "per_hour", "per_day", "per_month", "per_project", "unknown"]);
+var riskFlagSchema = external_exports.enum([
+  "deposit",
+  "training_fee",
+  "unpaid_trial",
+  "unclear_rate",
+  "unrealistic_volume",
+  "off_platform_payment",
+  "account_access",
+  "stale_post",
+  "agency_cut",
+  "other"
+]);
+var rateSchema = external_exports.object({
+  min: external_exports.number().nonnegative().finite(),
+  max: external_exports.number().nonnegative().finite().nullable().default(null),
+  unit: rateUnitSchema.default("unknown"),
+  volume: external_exports.string().max(200).default("")
+}).strict().refine((v) => v.max == null || v.max >= v.min, "Rate max must be at least min.");
 var evidenceSchema = external_exports.object({
   kind: external_exports.enum(["note", "comment", "image_text", "profile", "historical_review"]),
   text: external_exports.string().min(1).max(2e4),
@@ -11907,7 +11928,10 @@ var reviewSchema = external_exports.object({
   evidenceIds: external_exports.array(external_exports.string().min(1)).min(1).max(1e3),
   reviewer: external_exports.string().min(1).max(200),
   aiAcceptance: external_exports.enum(["accepted", "rejected", "unknown"]).default("unknown"),
-  demandType: external_exports.enum(["buyer", "seller", "unknown"]).default("unknown"),
+  demandType: demandTypeSchema.default("unknown"),
+  workMode: workModeSchema.default("unknown"),
+  rate: rateSchema.nullable().default(null),
+  riskFlags: external_exports.array(riskFlagSchema).max(20).default([]),
   budget: external_exports.number().nonnegative().finite().nullable().default(null),
   currency: external_exports.string().length(3).default("CNY")
 }).strict();
@@ -12310,17 +12334,26 @@ var filterSchema = external_exports.object({
   query: external_exports.string().optional(),
   publishedFrom: timestamp.optional(),
   publishedTo: timestamp.optional(),
+  maxAgeDays: external_exports.number().int().min(1).max(3650).optional(),
+  requireRemote: external_exports.boolean().default(false),
   requireAiAccepted: external_exports.boolean().default(false),
   minBudget: external_exports.number().nonnegative().optional(),
+  minRate: external_exports.number().nonnegative().optional(),
+  rateUnit: rateUnitSchema.optional(),
   currency: external_exports.string().length(3).default("CNY"),
-  excludeSellers: external_exports.boolean().default(true)
-}).strict().refine((v) => !v.publishedFrom || !v.publishedTo || Date.parse(v.publishedFrom) <= Date.parse(v.publishedTo), "Date range is reversed.");
-function screen(opportunity, criteria) {
+  excludeSellers: external_exports.boolean().default(true),
+  excludeIntermediaries: external_exports.boolean().default(false),
+  excludeRiskFlags: external_exports.array(riskFlagSchema).max(20).default([])
+}).strict().refine((v) => !v.publishedFrom || !v.publishedTo || Date.parse(v.publishedFrom) <= Date.parse(v.publishedTo), "Date range is reversed.").refine((v) => v.minRate === void 0 || v.rateUnit !== void 0, "rateUnit is required when minRate is set.");
+function screen(opportunity, criteria, now = Date.now()) {
   const c = filterSchema.parse(criteria);
   const reasons = [];
   let excluded = false;
   const o = opportunity;
   const review = o.reviewStale ? null : o.review;
+  const workMode = review?.workMode ?? "unknown";
+  const demandType = review?.demandType ?? "unknown";
+  const riskFlags = review?.riskFlags ?? [];
   if (o.reviewStale) reasons.push("REVIEW_STALE");
   if (review?.decision === "excluded" || o.stage === "closed") {
     excluded = true;
@@ -12338,10 +12371,33 @@ ${o.note.body}`.toLocaleLowerCase().includes(c.query.toLocaleLowerCase())) {
       reasons.push("OUTSIDE_DATE_RANGE");
     }
   }
-  if (c.excludeSellers && review?.demandType === "seller") {
+  if (c.maxAgeDays !== void 0) {
+    if (!o.note.publishedAt) {
+      if (!reasons.includes("DATE_UNKNOWN")) reasons.push("DATE_UNKNOWN");
+    } else if (now - Date.parse(o.note.publishedAt) > c.maxAgeDays * 864e5) {
+      excluded = true;
+      reasons.push("TOO_OLD");
+    }
+  }
+  if (c.requireRemote) {
+    if (workMode === "onsite") {
+      excluded = true;
+      reasons.push("ONSITE");
+    } else if (workMode === "hybrid") reasons.push("HYBRID");
+    else if (workMode !== "remote") reasons.push("REMOTE_UNVERIFIED");
+  }
+  if (c.excludeSellers && demandType === "seller") {
     excluded = true;
     reasons.push("SELLER");
-  } else if (!review || review.demandType === "unknown") reasons.push("DEMAND_UNVERIFIED");
+  } else if (!review || demandType === "unknown") reasons.push("DEMAND_UNVERIFIED");
+  if (c.excludeIntermediaries && (demandType === "agency" || demandType === "recruiter")) {
+    excluded = true;
+    reasons.push("INTERMEDIARY");
+  }
+  if (c.excludeRiskFlags.length && riskFlags.some((flag) => c.excludeRiskFlags.includes(flag))) {
+    excluded = true;
+    reasons.push("RISK_FLAG");
+  }
   if (c.requireAiAccepted) {
     if (review?.aiAcceptance === "rejected") {
       excluded = true;
@@ -12356,8 +12412,53 @@ ${o.note.body}`.toLocaleLowerCase().includes(c.query.toLocaleLowerCase())) {
       reasons.push("BUDGET_TOO_LOW");
     }
   }
+  if (c.minRate !== void 0) {
+    const rate = review?.rate;
+    if (!rate) reasons.push("RATE_UNKNOWN");
+    else if (c.rateUnit && rate.unit !== c.rateUnit) reasons.push("RATE_UNIT_MISMATCH");
+    else if (rate.max == null) {
+      if (rate.min < c.minRate) reasons.push("RATE_RANGE");
+    } else if (rate.max < c.minRate) {
+      excluded = true;
+      reasons.push("RATE_TOO_LOW");
+    } else if (rate.min < c.minRate) reasons.push("RATE_RANGE");
+  }
   if (review?.decision === "pending") reasons.push("REVIEW_PENDING");
-  return { key: o.key, result: excluded ? "excluded" : reasons.length ? "pending" : "match", reasons };
+  const quote = (o.evidence.find((e) => e.kind === "note") ?? o.evidence[0])?.text ?? null;
+  return {
+    key: o.key,
+    title: o.note.title,
+    url: o.url,
+    stage: o.stage,
+    publishedAt: o.note.publishedAt,
+    workMode,
+    demandType,
+    riskFlags,
+    result: excluded ? "excluded" : reasons.length ? "pending" : "match",
+    reasons: [...new Set(reasons)],
+    quote: quote ? quote.slice(0, 500) : null,
+    reviewReason: review?.reason ?? "",
+    rate: review?.rate ?? null,
+    budget: review?.budget ?? null,
+    currency: review?.currency ?? "CNY"
+  };
+}
+function summarizeScreen(items) {
+  const summary = {
+    match: 0,
+    pending: 0,
+    excluded: 0,
+    reasons: {},
+    workModes: { remote: 0, hybrid: 0, onsite: 0, unknown: 0 },
+    riskFlags: {}
+  };
+  for (const item of items) {
+    summary[item.result]++;
+    for (const reason of new Set(item.reasons)) summary.reasons[reason] = (summary.reasons[reason] ?? 0) + 1;
+    summary.workModes[item.workMode]++;
+    for (const flag of new Set(item.riskFlags)) summary.riskFlags[flag] = (summary.riskFlags[flag] ?? 0) + 1;
+  }
+  return summary;
 }
 
 // src/providers.ts
@@ -19850,16 +19951,16 @@ function mediaTypeEssence(header) {
 }
 
 // node_modules/@modelcontextprotocol/sdk/dist/esm/shared/transport.js
-function normalizeHeaders(headers) {
-  if (!headers)
+function normalizeHeaders(headers2) {
+  if (!headers2)
     return {};
-  if (headers instanceof Headers) {
-    return Object.fromEntries(headers.entries());
+  if (headers2 instanceof Headers) {
+    return Object.fromEntries(headers2.entries());
   }
-  if (Array.isArray(headers)) {
-    return Object.fromEntries(headers);
+  if (Array.isArray(headers2)) {
+    return Object.fromEntries(headers2);
   }
-  return { ...headers };
+  return { ...headers2 };
 }
 function createFetchWithInit(baseFetch = fetch, baseInit) {
   if (!baseInit) {
@@ -20280,11 +20381,11 @@ function selectClientAuthMethod(clientInformation, supportedMethods) {
   }
   return hasClientSecret ? "client_secret_post" : "none";
 }
-function applyClientAuthentication(method, clientInformation, headers, params) {
+function applyClientAuthentication(method, clientInformation, headers2, params) {
   const { client_id, client_secret } = clientInformation;
   switch (method) {
     case "client_secret_basic":
-      applyBasicAuth(client_id, client_secret, headers);
+      applyBasicAuth(client_id, client_secret, headers2);
       return;
     case "client_secret_post":
       applyPostAuth(client_id, client_secret, params);
@@ -20296,12 +20397,12 @@ function applyClientAuthentication(method, clientInformation, headers, params) {
       throw new Error(`Unsupported client authentication method: ${method}`);
   }
 }
-function applyBasicAuth(clientId, clientSecret, headers) {
+function applyBasicAuth(clientId, clientSecret, headers2) {
   if (!clientSecret) {
     throw new Error("client_secret_basic authentication requires a client_secret");
   }
   const credentials = btoa(`${clientId}:${clientSecret}`);
-  headers.set("Authorization", `Basic ${credentials}`);
+  headers2.set("Authorization", `Basic ${credentials}`);
 }
 function applyPostAuth(clientId, clientSecret, params) {
   params.set("client_id", clientId);
@@ -20568,12 +20669,12 @@ async function discoverOAuthProtectedResourceMetadata(serverUrl, opts, fetchFn =
   }
   return OAuthProtectedResourceMetadataSchema.parse(await response.json());
 }
-async function fetchWithCorsRetry(url2, headers, fetchFn = fetch) {
+async function fetchWithCorsRetry(url2, headers2, fetchFn = fetch) {
   try {
-    return await fetchWithinOrigin(fetchFn)(url2, { headers });
+    return await fetchWithinOrigin(fetchFn)(url2, { headers: headers2 });
   } catch (error2) {
     if (error2 instanceof TypeError) {
-      if (headers) {
+      if (headers2) {
         return fetchWithCorsRetry(url2, void 0, fetchFn);
       } else {
         return void 0;
@@ -20589,10 +20690,10 @@ function buildWellKnownPath(wellKnownPrefix, pathname = "", options = {}) {
   return options.prependPathname ? `${pathname}/.well-known/${wellKnownPrefix}` : `/.well-known/${wellKnownPrefix}${pathname}`;
 }
 async function tryMetadataDiscovery(url2, protocolVersion, fetchFn = fetch) {
-  const headers = {
+  const headers2 = {
     "MCP-Protocol-Version": protocolVersion
   };
-  return await fetchWithCorsRetry(url2, headers, fetchFn);
+  return await fetchWithCorsRetry(url2, headers2, fetchFn);
 }
 function shouldAttemptFallback(response, pathname) {
   return !response || !response.ok && response.status < 500 && pathname !== "/";
@@ -20649,13 +20750,13 @@ function buildDiscoveryUrls(authorizationServerUrl) {
   return urlsToTry;
 }
 async function discoverAuthorizationServerMetadata(authorizationServerUrl, { fetchFn = fetch, protocolVersion = LATEST_PROTOCOL_VERSION } = {}) {
-  const headers = {
+  const headers2 = {
     "MCP-Protocol-Version": protocolVersion,
     Accept: "application/json"
   };
   const urlsToTry = buildDiscoveryUrls(authorizationServerUrl);
   for (const { url: endpointUrl, type } of urlsToTry) {
-    const response = await fetchWithCorsRetry(endpointUrl, headers, fetchFn);
+    const response = await fetchWithCorsRetry(endpointUrl, headers2, fetchFn);
     if (!response) {
       continue;
     }
@@ -20742,7 +20843,7 @@ function prepareAuthorizationCodeRequest(authorizationCode, codeVerifier, redire
 }
 async function executeTokenRequest(authorizationServerUrl, { metadata, tokenRequestParams, clientInformation, addClientAuthentication, resource, fetchFn }) {
   const tokenUrl = metadata?.token_endpoint ? new URL(metadata.token_endpoint) : new URL("/token", authorizationServerUrl);
-  const headers = new Headers({
+  const headers2 = new Headers({
     "Content-Type": "application/x-www-form-urlencoded",
     Accept: "application/json"
   });
@@ -20750,15 +20851,15 @@ async function executeTokenRequest(authorizationServerUrl, { metadata, tokenRequ
     tokenRequestParams.set("resource", resourceIndicatorToString(resource));
   }
   if (addClientAuthentication) {
-    await addClientAuthentication(headers, tokenRequestParams, tokenUrl, metadata);
+    await addClientAuthentication(headers2, tokenRequestParams, tokenUrl, metadata);
   } else if (clientInformation) {
     const supportedMethods = metadata?.token_endpoint_auth_methods_supported ?? [];
     const authMethod = selectClientAuthMethod(clientInformation, supportedMethods);
-    applyClientAuthentication(authMethod, clientInformation, headers, tokenRequestParams);
+    applyClientAuthentication(authMethod, clientInformation, headers2, tokenRequestParams);
   }
   const response = await fetchWithinOrigin(fetchFn ?? fetch)(tokenUrl, {
     method: "POST",
-    headers,
+    headers: headers2,
     body: tokenRequestParams
   });
   if (!response.ok) {
@@ -21101,35 +21202,35 @@ var StreamableHTTPClientTransport = class {
     return await this._startOrAuthSse({ resumptionToken: void 0 });
   }
   async _commonHeaders() {
-    const headers = {};
+    const headers2 = {};
     if (this._authProvider) {
       const tokens = await this._authProvider.tokens();
       if (tokens) {
-        headers["Authorization"] = `Bearer ${tokens.access_token}`;
+        headers2["Authorization"] = `Bearer ${tokens.access_token}`;
       }
     }
     if (this._sessionId) {
-      headers["mcp-session-id"] = this._sessionId;
+      headers2["mcp-session-id"] = this._sessionId;
     }
     if (this._protocolVersion) {
-      headers["mcp-protocol-version"] = this._protocolVersion;
+      headers2["mcp-protocol-version"] = this._protocolVersion;
     }
     const extraHeaders = normalizeHeaders(this._requestInit?.headers);
     return new Headers({
-      ...headers,
+      ...headers2,
       ...extraHeaders
     });
   }
   async _startOrAuthSse(options) {
     const { resumptionToken } = options;
     try {
-      const headers = await this._commonHeaders();
-      headers.set("Accept", "text/event-stream");
+      const headers2 = await this._commonHeaders();
+      headers2.set("Accept", "text/event-stream");
       if (resumptionToken) {
-        headers.set("last-event-id", resumptionToken);
+        headers2.set("last-event-id", resumptionToken);
       }
       const fetchFn = this._fetch ?? fetch;
-      const init = { method: "GET", headers, signal: this._abortController?.signal };
+      const init = { method: "GET", headers: headers2, signal: this._abortController?.signal };
       let response = await fetchFn(this._url, this._followRedirects ? init : { ...init, redirect: "manual" });
       const followed = this._followRedirects ? void 0 : followWithinOrigin(fetchFn, this._url, init, response);
       if (followed) {
@@ -21296,13 +21397,13 @@ var StreamableHTTPClientTransport = class {
         this._startOrAuthSse({ resumptionToken, replayMessageId: isJSONRPCRequest(message) ? message.id : void 0 }).catch((err) => this.onerror?.(err));
         return;
       }
-      const headers = await this._commonHeaders();
-      headers.set("content-type", "application/json");
-      headers.set("accept", "application/json, text/event-stream");
+      const headers2 = await this._commonHeaders();
+      headers2.set("content-type", "application/json");
+      headers2.set("accept", "application/json, text/event-stream");
       const init = {
         ...this._requestInit,
         method: "POST",
-        headers,
+        headers: headers2,
         body: JSON.stringify(message),
         signal: this._abortController?.signal
       };
@@ -21413,11 +21514,11 @@ var StreamableHTTPClientTransport = class {
       return;
     }
     try {
-      const headers = await this._commonHeaders();
+      const headers2 = await this._commonHeaders();
       const init = {
         ...this._requestInit,
         method: "DELETE",
-        headers,
+        headers: headers2,
         signal: this._abortController?.signal
       };
       const response = await fetchWithinOrigin(this._fetch ?? fetch)(this._url, init);
@@ -21549,7 +21650,7 @@ var EventSource = class extends EventTarget {
     super(), __privateAdd(this, _EventSource_instances), this.CONNECTING = 0, this.OPEN = 1, this.CLOSED = 2, __privateAdd(this, _readyState), __privateAdd(this, _url2), __privateAdd(this, _redirectUrl), __privateAdd(this, _withCredentials), __privateAdd(this, _fetch), __privateAdd(this, _reconnectInterval), __privateAdd(this, _reconnectTimer), __privateAdd(this, _lastEventId, null), __privateAdd(this, _controller), __privateAdd(this, _parser), __privateAdd(this, _onError, null), __privateAdd(this, _onMessage, null), __privateAdd(this, _onOpen, null), __privateAdd(this, _onFetchResponse, async (response) => {
       var _a2;
       __privateGet(this, _parser).reset();
-      const { body, redirected, status, headers } = response;
+      const { body, redirected, status, headers: headers2 } = response;
       if (status === 204) {
         __privateMethod(this, _EventSource_instances, failConnection_fn).call(this, "Server sent HTTP 204, not reconnecting", 204), this.close();
         return;
@@ -21558,7 +21659,7 @@ var EventSource = class extends EventTarget {
         __privateMethod(this, _EventSource_instances, failConnection_fn).call(this, `Non-200 status code (${status})`, status);
         return;
       }
-      if (!(headers.get("content-type") || "").startsWith("text/event-stream")) {
+      if (!(headers2.get("content-type") || "").startsWith("text/event-stream")) {
         __privateMethod(this, _EventSource_instances, failConnection_fn).call(this, 'Invalid content type, expected "text/event-stream"', status);
         return;
       }
@@ -21800,19 +21901,19 @@ var SSEClientTransport = class {
     return await this._startOrAuth();
   }
   async _commonHeaders() {
-    const headers = {};
+    const headers2 = {};
     if (this._authProvider) {
       const tokens = await this._authProvider.tokens();
       if (tokens) {
-        headers["Authorization"] = `Bearer ${tokens.access_token}`;
+        headers2["Authorization"] = `Bearer ${tokens.access_token}`;
       }
     }
     if (this._protocolVersion) {
-      headers["mcp-protocol-version"] = this._protocolVersion;
+      headers2["mcp-protocol-version"] = this._protocolVersion;
     }
     const extraHeaders = normalizeHeaders(this._requestInit?.headers);
     return new Headers({
-      ...headers,
+      ...headers2,
       ...extraHeaders
     });
   }
@@ -21824,11 +21925,11 @@ var SSEClientTransport = class {
       this._eventSource = new EventSource(this._url.href, {
         ...this._eventSourceInit,
         fetch: async (url2, init) => {
-          const headers = await this._commonHeaders();
-          headers.set("Accept", "text/event-stream");
+          const headers2 = await this._commonHeaders();
+          headers2.set("Accept", "text/event-stream");
           const response = await fetchImpl(url2, {
             ...init,
-            headers
+            headers: headers2
           });
           redirect = this._unfollowedRedirect(response, url2);
           if (response.status === 401 && response.headers.has("www-authenticate")) {
@@ -21913,12 +22014,12 @@ var SSEClientTransport = class {
       throw new Error("Not connected");
     }
     try {
-      const headers = await this._commonHeaders();
-      headers.set("content-type", "application/json");
+      const headers2 = await this._commonHeaders();
+      headers2.set("content-type", "application/json");
       const init = {
         ...this._requestInit,
         method: "POST",
-        headers,
+        headers: headers2,
         body: JSON.stringify(message),
         signal: this._abortController?.signal
       };
@@ -22076,16 +22177,16 @@ async function connectMcp(config2) {
     if (url2.protocol !== "https:" && !(url2.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url2.hostname)))
       throw new KitError("CONFIG_ERROR", "Use HTTPS or a loopback HTTP endpoint.");
     if (url2.username || url2.password) throw new KitError("CONFIG_ERROR", "Use bearerTokenEnv instead of URL credentials.");
-    const headers = {};
+    const headers2 = {};
     if (config2.bearerTokenEnv) {
       const token = process.env[config2.bearerTokenEnv];
       if (!token) throw new KitError("CONFIG_ERROR", "Configured bearer token environment variable is unset.");
-      headers.Authorization = `Bearer ${token}`;
+      headers2.Authorization = `Bearer ${token}`;
     }
     transport = config2.transport === "sse" ? new SSEClientTransport(url2, {
-      requestInit: { headers },
-      eventSourceInit: { fetch: (input, init) => fetch(input, { ...init, headers: { ...headers, ...Object.fromEntries(new Headers(init?.headers)) } }) }
-    }) : new StreamableHTTPClientTransport(url2, { requestInit: { headers } });
+      requestInit: { headers: headers2 },
+      eventSourceInit: { fetch: (input, init) => fetch(input, { ...init, headers: { ...headers2, ...Object.fromEntries(new Headers(init?.headers)) } }) }
+    }) : new StreamableHTTPClientTransport(url2, { requestInit: { headers: headers2 } });
   }
   try {
     await client.connect(transport, { timeout: config2.timeoutMs, signal: AbortSignal.timeout(config2.timeoutMs) });
@@ -22109,30 +22210,461 @@ async function createProvider(config2) {
 }
 
 // src/exporter.ts
+var headers = {
+  en: [
+    "key",
+    "title",
+    "url",
+    "published_at",
+    "observed_at",
+    "stage",
+    "decision",
+    "review_stale",
+    "work_mode",
+    "demand_type",
+    "rate_min",
+    "rate_max",
+    "rate_unit",
+    "rate_volume",
+    "risk_flags",
+    "reason",
+    "ai_acceptance",
+    "budget",
+    "currency"
+  ],
+  zh: [
+    "\u8BB0\u5F55ID",
+    "\u6807\u9898",
+    "\u94FE\u63A5",
+    "\u53D1\u5E03\u65F6\u95F4",
+    "\u89C2\u5BDF\u65F6\u95F4",
+    "\u9636\u6BB5",
+    "\u5224\u65AD",
+    "\u5224\u65AD\u8FC7\u671F",
+    "\u5DE5\u4F5C\u65B9\u5F0F",
+    "\u9700\u6C42\u65B9\u7C7B\u578B",
+    "\u6700\u4F4E\u5355\u4EF7",
+    "\u6700\u9AD8\u5355\u4EF7",
+    "\u8BA1\u4EF7\u5355\u4F4D",
+    "\u5DE5\u4F5C\u91CF",
+    "\u98CE\u9669\u6807\u8BB0",
+    "\u5224\u65AD\u7406\u7531",
+    "AI\u63A5\u53D7\u5EA6",
+    "\u9884\u7B97",
+    "\u5E01\u79CD"
+  ]
+};
+var zhValues = {
+  stage: { discovered: "\u5F85\u5904\u7406", contacted: "\u5DF2\u8054\u7CFB", requirements_review: "\u9700\u6C42\u786E\u8BA4", accepted: "\u5DF2\u63A5\u53D7", delivered: "\u5DF2\u4EA4\u4ED8", closed: "\u5DF2\u5173\u95ED" },
+  decision: { priority: "\u91CD\u70B9", pending: "\u5F85\u5B9A", excluded: "\u6392\u9664", unreviewed: "\u672A\u5224\u65AD" },
+  workMode: { remote: "\u8FDC\u7A0B", hybrid: "\u6DF7\u5408", onsite: "\u5750\u73ED", unknown: "\u672A\u77E5" },
+  demandType: { buyer: "\u76F4\u62DB", agency: "\u5DE5\u4F5C\u5BA4/\u4E2D\u4ECB", recruiter: "\u62DB\u52DF\u65B9", seller: "\u5356\u670D\u52A1", unknown: "\u672A\u77E5" },
+  rateUnit: { per_item: "\u5143/\u6761", per_minute: "\u5143/\u5206\u949F", per_hour: "\u5143/\u5C0F\u65F6", per_day: "\u5143/\u5929", per_month: "\u5143/\u6708", per_project: "\u5143/\u9879\u76EE", unknown: "\u5143" },
+  riskFlag: {
+    deposit: "\u62BC\u91D1",
+    training_fee: "\u57F9\u8BAD\u8D39",
+    unpaid_trial: "\u514D\u8D39\u8BD5\u7A3F",
+    unclear_rate: "\u5355\u4EF7\u4E0D\u6E05",
+    unrealistic_volume: "\u5DE5\u4F5C\u91CF\u5F02\u5E38",
+    off_platform_payment: "\u7AD9\u5916\u7ED3\u7B97",
+    account_access: "\u7D22\u8981\u8D26\u53F7",
+    stale_post: "\u53EF\u80FD\u8FC7\u671F",
+    agency_cut: "\u4E2D\u4ECB\u62BD\u6210",
+    other: "\u5176\u4ED6\u98CE\u9669"
+  },
+  aiAcceptance: { accepted: "\u63A5\u53D7", rejected: "\u4E0D\u63A5\u53D7", unknown: "\u672A\u77E5" }
+};
+function zhValue(group, value) {
+  return zhValues[group][value] ?? value;
+}
 function csvCell(value) {
   let text = value == null ? "" : String(value);
   if (/^[\s\uFEFF]*[=+@-]/u.test(text) || /^[\t\r\n]/u.test(text)) text = `'${text}`;
   return `"${text.replaceAll('"', '""')}"`;
 }
-function exportCsv(rows) {
-  const header = ["key", "title", "url", "published_at", "observed_at", "stage", "decision", "review_stale", "reason", "ai_acceptance", "budget", "currency"];
-  return [header, ...rows.map((o) => [
-    o.key,
-    o.note.title,
-    o.url,
-    o.note.publishedAt,
-    o.lastSeenAt,
-    o.stage,
-    o.review?.decision ?? "unreviewed",
-    o.reviewStale,
-    o.review?.reason,
-    o.review?.aiAcceptance ?? "unknown",
-    o.review?.budget,
-    o.review?.currency
-  ])].map((row) => row.map(csvCell).join(",")).join("\r\n") + "\r\n";
+function exportCsv(rows, header = "en") {
+  const zh = header === "zh";
+  return [headers[header], ...rows.map((o) => {
+    const rate = o.review?.rate;
+    return [
+      o.key,
+      o.note.title,
+      o.url,
+      o.note.publishedAt,
+      o.lastSeenAt,
+      zh ? zhValue("stage", o.stage) : o.stage,
+      zh ? zhValue("decision", o.review?.decision ?? "unreviewed") : o.review?.decision ?? "unreviewed",
+      zh ? o.reviewStale ? "\u662F" : "\u5426" : o.reviewStale,
+      zh ? zhValue("workMode", o.review?.workMode ?? "unknown") : o.review?.workMode ?? "unknown",
+      zh ? zhValue("demandType", o.review?.demandType ?? "unknown") : o.review?.demandType ?? "unknown",
+      rate?.min ?? "",
+      rate?.max ?? "",
+      rate ? zh ? zhValue("rateUnit", rate.unit) : rate.unit : "",
+      rate?.volume ?? "",
+      (o.review?.riskFlags ?? []).map((flag) => zh ? zhValue("riskFlag", flag) : flag).join(";"),
+      o.review?.reason,
+      zh ? zhValue("aiAcceptance", o.review?.aiAcceptance ?? "unknown") : o.review?.aiAcceptance ?? "unknown",
+      o.review?.budget ?? "",
+      o.review?.currency ?? "CNY"
+    ];
+  })].map((row) => row.map(csvCell).join(",")).join("\r\n") + "\r\n";
 }
 function exportJson(rows) {
   return JSON.stringify({ schemaVersion: 1, exportedAt: (/* @__PURE__ */ new Date()).toISOString(), opportunities: rows }, null, 2) + "\n";
+}
+
+// src/report.ts
+var labels = {
+  zh: {
+    defaultTitle: "\u673A\u4F1A\u62A5\u544A",
+    defaultScope: "\u672C\u5730\u8BB0\u5F55\uFF0C\u6309\u5F53\u524D\u6761\u4EF6\u7B5B\u9009",
+    match: "\u5EFA\u8BAE\u5148\u8054\u7CFB",
+    pending: "\u503C\u5F97\u95EE\u4E00\u53E5",
+    excluded: "\u4E0D\u5EFA\u8BAE",
+    noMatch: "\u8FD9\u6B21\u6CA1\u6709\u7B26\u5408\u6761\u4EF6\u7684\u8BB0\u5F55\u3002",
+    noPending: "\u8FD9\u6B21\u6CA1\u6709\u9700\u8981\u8FFD\u95EE\u7684\u8BB0\u5F55\u3002",
+    noExcluded: "\u8FD9\u6B21\u6CA1\u6709\u6392\u9664\u8BB0\u5F55\u3002",
+    quote: "\u539F\u5E16\u539F\u8BDD",
+    risk: "\u5148\u786E\u8BA4",
+    open: "\u6253\u5F00\u539F\u5E16",
+    untitled: "\u672A\u547D\u540D\u7B14\u8BB0",
+    generated: "\u751F\u6210\u65F6\u95F4",
+    technical: "\u6280\u672F\u7EC6\u8282",
+    footer: "\u672C\u62A5\u544A\u7531\u672C\u5730\u6570\u636E\u751F\u6210\uFF1B\u4E0D\u4F1A\u53D1\u9001\u6D88\u606F\uFF0C\u4E5F\u4E0D\u4F1A\u81EA\u52A8\u63A5\u5355\u3002",
+    reasons: "\u539F\u56E0",
+    workModes: "\u5DE5\u4F5C\u65B9\u5F0F",
+    counts: "\u7EDF\u8BA1",
+    total: "\u8BB0\u5F55\u6570",
+    remoteCount: "\u660E\u786E\u8FDC\u7A0B",
+    remotePending: "\u8FDC\u7A0B\u5F85\u786E\u8BA4",
+    onsiteCount: "\u5750\u73ED/\u5230\u5C97",
+    noQuote: "\u6682\u65E0\u6B63\u6587\u6458\u5F55\uFF0C\u8BF7\u6253\u5F00\u539F\u5E16\u67E5\u770B\u3002"
+  },
+  en: {
+    defaultTitle: "Opportunity report",
+    defaultScope: "Local records, filtered by the current criteria",
+    match: "Recommended",
+    pending: "Worth asking",
+    excluded: "Not recommended",
+    noMatch: "No records match the current criteria.",
+    noPending: "Nothing needs a follow-up question.",
+    noExcluded: "Nothing was excluded.",
+    quote: "Post excerpt",
+    risk: "Confirm first",
+    open: "Open post",
+    untitled: "Untitled note",
+    generated: "Generated",
+    technical: "Technical details",
+    footer: "Generated from local data; no messages are sent and no work is accepted automatically.",
+    reasons: "Reasons",
+    workModes: "Work mode",
+    counts: "Counts",
+    total: "Records",
+    remoteCount: "Remote",
+    remotePending: "Remote unconfirmed",
+    onsiteCount: "On-site",
+    noQuote: "No readable excerpt; open the post to inspect it."
+  }
+};
+var workModeLabels = {
+  zh: { remote: "\u8FDC\u7A0B\uFF08\u660E\u786E\uFF09", hybrid: "\u8FDC\u7A0B\uFF08\u53EF\u80FD\u6DF7\u5408\uFF09", onsite: "\u5750\u73ED/\u5230\u5C97", unknown: "\u8FDC\u7A0B\uFF08\u9700\u786E\u8BA4\uFF09" },
+  en: { remote: "Remote (confirmed)", hybrid: "Remote (hybrid)", onsite: "On-site", unknown: "Remote (unconfirmed)" }
+};
+var demandTypeLabels = {
+  zh: { buyer: "\u76F4\u62DB", agency: "\u5DE5\u4F5C\u5BA4/\u4E2D\u4ECB", recruiter: "\u62DB\u52DF\u65B9", seller: "\u5356\u670D\u52A1/\u8BFE\u7A0B", unknown: "\u9700\u6C42\u65B9\u672A\u5224\u65AD" },
+  en: { buyer: "Direct client", agency: "Agency", recruiter: "Recruiter", seller: "Seller/course", unknown: "Demand type unknown" }
+};
+var stageLabels = {
+  zh: { discovered: "\u5F85\u5904\u7406", contacted: "\u5DF2\u8054\u7CFB", requirements_review: "\u9700\u6C42\u786E\u8BA4", accepted: "\u5DF2\u63A5\u53D7", delivered: "\u5DF2\u4EA4\u4ED8", closed: "\u5DF2\u5173\u95ED" },
+  en: { discovered: "Discovered", contacted: "Contacted", requirements_review: "Requirements review", accepted: "Accepted", delivered: "Delivered", closed: "Closed" }
+};
+var riskLabels = {
+  zh: {
+    deposit: "\u62BC\u91D1",
+    training_fee: "\u57F9\u8BAD\u8D39",
+    unpaid_trial: "\u514D\u8D39\u8BD5\u7A3F",
+    unclear_rate: "\u5355\u4EF7\u4E0D\u6E05",
+    unrealistic_volume: "\u5DE5\u4F5C\u91CF\u5F02\u5E38",
+    off_platform_payment: "\u7AD9\u5916\u7ED3\u7B97",
+    account_access: "\u7D22\u8981\u8D26\u53F7",
+    stale_post: "\u53EF\u80FD\u8FC7\u671F",
+    agency_cut: "\u4E2D\u4ECB\u62BD\u6210",
+    other: "\u5176\u4ED6\u98CE\u9669"
+  },
+  en: {
+    deposit: "Deposit",
+    training_fee: "Training fee",
+    unpaid_trial: "Unpaid trial",
+    unclear_rate: "Unclear rate",
+    unrealistic_volume: "Unrealistic volume",
+    off_platform_payment: "Off-platform payment",
+    account_access: "Account access",
+    stale_post: "Possibly stale",
+    agency_cut: "Agency cut",
+    other: "Other risk"
+  }
+};
+var rateUnitLabels = {
+  zh: { per_item: "\u5143/\u6761", per_minute: "\u5143/\u5206\u949F", per_hour: "\u5143/\u5C0F\u65F6", per_day: "\u5143/\u5929", per_month: "\u5143/\u6708", per_project: "\u5143/\u9879\u76EE", unknown: "\u5143" },
+  en: { per_item: "/item", per_minute: "/minute", per_hour: "/hour", per_day: "/day", per_month: "/month", per_project: "/project", unknown: "" }
+};
+var reasonLabels = {
+  zh: {
+    REMOTE_UNVERIFIED: "\u8FD8\u6CA1\u786E\u8BA4\u662F\u5426\u5168\u7A0B\u8FDC\u7A0B",
+    HYBRID: "\u53EF\u80FD\u662F\u6DF7\u5408\u529E\u516C",
+    ONSITE: "\u8981\u6C42\u5750\u73ED/\u5230\u5C97",
+    SELLER: "\u540C\u884C/\u5356\u670D\u52A1\u6216\u8BFE\u7A0B",
+    INTERMEDIARY: "\u4E2D\u4ECB/\u62DB\u52DF\u65B9",
+    RISK_FLAG: "\u547D\u4E2D\u4F60\u6392\u9664\u7684\u98CE\u9669\u6807\u8BB0",
+    DEMAND_UNVERIFIED: "\u8FD8\u6CA1\u5224\u65AD\u662F\u76F4\u62DB\u8FD8\u662F\u4E2D\u4ECB",
+    DATE_UNKNOWN: "\u53D1\u5E03\u65F6\u95F4\u672A\u77E5",
+    TOO_OLD: "\u53D1\u5E03\u65F6\u95F4\u592A\u4E45",
+    QUERY_MISMATCH: "\u548C\u641C\u7D22\u8BCD\u4E0D\u5339\u914D",
+    OUTSIDE_DATE_RANGE: "\u4E0D\u5728\u65F6\u95F4\u8303\u56F4\u5185",
+    EXCLUDED_OR_CLOSED: "\u5DF2\u6392\u9664\u6216\u5DF2\u5173\u95ED",
+    REVIEW_STALE: "\u539F\u5E16\u6709\u66F4\u65B0\uFF0C\u65E7\u5224\u65AD\u5DF2\u8FC7\u671F",
+    AI_ACCEPTANCE_UNKNOWN: "\u5BF9\u65B9\u662F\u5426\u63A5\u53D7 AI \u672A\u77E5",
+    AI_REJECTED: "\u5BF9\u65B9\u660E\u786E\u4E0D\u63A5\u53D7 AI",
+    BUDGET_UNKNOWN: "\u5355\u4EF7/\u9884\u7B97\u672A\u77E5",
+    BUDGET_TOO_LOW: "\u4F4E\u4E8E\u4F60\u7684\u5E95\u7EBF",
+    CURRENCY_MISMATCH: "\u5E01\u79CD\u4E0D\u4E00\u81F4",
+    RATE_UNKNOWN: "\u5355\u4EF7\u672A\u77E5",
+    RATE_UNIT_MISMATCH: "\u8BA1\u4EF7\u5355\u4F4D\u548C\u4F60\u7684\u5E95\u7EBF\u4E0D\u4E00\u81F4",
+    RATE_TOO_LOW: "\u5355\u4EF7\u4F4E\u4E8E\u4F60\u7684\u5E95\u7EBF",
+    RATE_RANGE: "\u5355\u4EF7\u533A\u95F4\u8DE8\u8FC7\u4F60\u7684\u5E95\u7EBF",
+    REVIEW_PENDING: "\u8FD8\u6CA1\u6709\u4E0B\u6700\u7EC8\u5224\u65AD"
+  },
+  en: {
+    REMOTE_UNVERIFIED: "Remote work is not confirmed",
+    HYBRID: "Possibly hybrid",
+    ONSITE: "Requires attendance",
+    SELLER: "Seller/course, not a buyer",
+    INTERMEDIARY: "Agency or recruiter",
+    RISK_FLAG: "Matches an excluded risk flag",
+    DEMAND_UNVERIFIED: "Demand type is not judged yet",
+    DATE_UNKNOWN: "Publish date unknown",
+    TOO_OLD: "Published too long ago",
+    QUERY_MISMATCH: "Does not match the query",
+    OUTSIDE_DATE_RANGE: "Outside the date range",
+    EXCLUDED_OR_CLOSED: "Excluded or closed",
+    REVIEW_STALE: "Post changed; the old judgment is stale",
+    AI_ACCEPTANCE_UNKNOWN: "AI acceptance is unknown",
+    AI_REJECTED: "AI use is rejected",
+    BUDGET_UNKNOWN: "Rate or budget unknown",
+    BUDGET_TOO_LOW: "Below your floor",
+    CURRENCY_MISMATCH: "Currency mismatch",
+    RATE_UNKNOWN: "Rate unknown",
+    RATE_UNIT_MISMATCH: "Rate unit differs from your floor",
+    RATE_TOO_LOW: "Rate is below your floor",
+    RATE_RANGE: "Rate range crosses your floor",
+    REVIEW_PENDING: "No final judgment yet"
+  }
+};
+var htmlEntities = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (ch) => htmlEntities[ch]);
+}
+function safeHref(value) {
+  try {
+    const url2 = new URL(value);
+    return url2.protocol === "https:" ? escapeHtml(url2.toString()) : "#";
+  } catch {
+    return "#";
+  }
+}
+function formatRate(rate, locale) {
+  if (!rate) return "";
+  const unit = rateUnitLabels[locale][rate.unit];
+  const amount = rate.max == null ? String(rate.min) : `${rate.min}\u2013${rate.max}`;
+  const suffix = locale === "zh" ? `${amount} ${unit}` : `CNY ${amount}${unit}`;
+  return `${suffix}${rate.volume ? ` \xB7 ${rate.volume}` : ""}`;
+}
+function formatMoney(item, locale) {
+  const rate = formatRate(item.rate, locale);
+  if (rate) return rate;
+  if (item.budget != null) return locale === "zh" ? `\u9884\u7B97 ${item.budget} ${item.currency}` : `${item.budget} ${item.currency}`;
+  return locale === "zh" ? "\u5355\u4EF7/\u9884\u7B97\u5F85\u786E\u8BA4" : "Rate/budget to confirm";
+}
+function reasonLabel(code, locale) {
+  return reasonLabels[locale][code] ?? code;
+}
+function formatDate(value, locale) {
+  if (!value) return locale === "zh" ? "\u53D1\u5E03\u65F6\u95F4\u672A\u77E5" : "Date unknown";
+  return value.slice(0, 10);
+}
+function aggregateReasons(items) {
+  const counts = {};
+  for (const item of items) for (const reason of new Set(item.reasons)) counts[reason] = (counts[reason] ?? 0) + 1;
+  return Object.entries(counts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([code, count]) => ({ code, count }));
+}
+function card(item, locale) {
+  const t = labels[locale];
+  const risks = item.riskFlags.map((flag) => riskLabels[locale][flag]);
+  const riskJoiner = locale === "zh" ? "\u3001" : ", ";
+  const riskColon = locale === "zh" ? "\uFF1A" : ": ";
+  const why = item.reviewReason ? `<p class="why">${escapeHtml(item.reviewReason)}</p>` : "";
+  const reason = item.result === "pending" ? `${why}<ul class="reasons">${[...new Set(item.reasons)].map((r) => `<li>${escapeHtml(reasonLabel(r, locale))}</li>`).join("")}</ul>` : why;
+  return `<article class="card ${item.workMode}">
+  <div class="card-head"><span class="badge ${item.workMode}">${escapeHtml(workModeLabels[locale][item.workMode])}</span>
+  <span class="badge muted">${escapeHtml(demandTypeLabels[locale][item.demandType])}</span></div>
+  <h3>${escapeHtml(item.title || t.untitled)}</h3>
+  <p class="meta">${escapeHtml(formatMoney(item, locale))} \xB7 ${escapeHtml(stageLabels[locale][item.stage] ?? item.stage)} \xB7 ${escapeHtml(formatDate(item.publishedAt, locale))}</p>
+  <blockquote><span>${escapeHtml(t.quote)}</span>${escapeHtml(item.quote || t.noQuote)}</blockquote>
+  ${reason}
+  ${risks.length ? `<p class="risk"><strong>${escapeHtml(t.risk)}${riskColon}</strong>${escapeHtml(risks.join(riskJoiner))}</p>` : ""}
+  <a class="open" href="${safeHref(item.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(t.open)}</a>
+</article>`;
+}
+function buildReport(opportunities, options = {}) {
+  const locale = options.locale ?? "zh";
+  const t = labels[locale];
+  const criteria = filterSchema.parse(options.criteria ?? {});
+  const now = options.now ?? Date.now();
+  const items = opportunities.map((o) => screen(o, criteria, now));
+  const summary = summarizeScreen(items);
+  const matches = items.filter((item) => item.result === "match");
+  const pending = items.filter((item) => item.result === "pending");
+  const excluded = items.filter((item) => item.result === "excluded");
+  const excludedReasons = aggregateReasons(excluded);
+  const generatedAt = new Date(now).toISOString();
+  const title = options.title ?? t.defaultTitle;
+  const scope = options.scope ?? t.defaultScope;
+  const technical = escapeHtml(JSON.stringify({ generatedAt, criteria, summary, total: items.length }, null, 2));
+  const html = `<!doctype html>
+<html lang="${locale === "zh" ? "zh-CN" : "en"}">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeHtml(title)}</title>
+<style>
+:root{color-scheme:light}*{box-sizing:border-box}body{margin:0;background:#f6f4ef;color:#211f1b;font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB",sans-serif}
+main{max-width:900px;margin:0 auto;padding:40px 20px 64px}h1{font-size:32px;line-height:1.2;margin:8px 0 10px}
+.eyebrow{color:#8a5a2b;font-weight:700;letter-spacing:.08em;text-transform:uppercase;font-size:12px;margin:0}
+.scope{color:#625c52;margin:0 0 20px}.stats{display:flex;gap:18px;flex-wrap:wrap;padding:16px 0 24px;border-bottom:1px solid #ddd6ca}
+.stats b{font-size:22px;display:block}.stats span{color:#625c52;font-size:13px}
+h2{font-size:20px;margin:32px 0 12px}.card{background:#fff;border:1px solid #e5ded2;border-radius:16px;padding:18px 20px;margin:12px 0;box-shadow:0 2px 10px rgba(50,40,20,.04)}
+.card.remote{border-left:5px solid #2f7d4f}.card.hybrid{border-left:5px solid #b7791f}.card.unknown{border-left:5px solid #b7791f}.card.onsite{border-left:5px solid #a33a3a}
+.card-head{display:flex;gap:8px;flex-wrap:wrap}.badge{display:inline-block;border-radius:999px;padding:2px 10px;font-size:12px;font-weight:700;background:#e8f3ec;color:#23633f}
+.badge.hybrid{background:#fff3dc;color:#7a4d00}.badge.onsite{background:#fbe7e7;color:#8a2525}.badge.unknown{background:#fff3dc;color:#7a4d00}.badge.muted{background:#f0ece4;color:#5a5348}
+.card h3{margin:10px 0 4px;font-size:19px}.meta{color:#625c52;margin:0 0 10px;font-size:14px}
+blockquote{margin:10px 0;padding:10px 14px;background:#faf8f3;border-left:3px solid #d8cfc0;border-radius:6px;white-space:pre-wrap}
+blockquote span{display:block;font-size:11px;letter-spacing:.06em;color:#8a8276;text-transform:uppercase;margin-bottom:4px}
+.why{margin:10px 0}.reasons{margin:10px 0;padding-left:20px;color:#5d4a1f}.risk{background:#fff8e8;border:1px solid #f0dfb8;padding:8px 10px;border-radius:8px;font-size:14px}
+.open{display:inline-block;margin-top:8px;color:#1f5c3a;font-weight:700}.excluded-list{background:#fff;border:1px solid #e5ded2;border-radius:12px;padding:6px 20px}
+.excluded-list li{margin:8px 0}.excluded-list span{color:#8a8276;float:right}details{margin-top:32px;color:#625c52}pre{white-space:pre-wrap;word-break:break-word;background:#fff;border:1px solid #e5ded2;border-radius:10px;padding:12px;font-size:12px}
+footer{margin-top:28px;color:#8a8276;font-size:13px}
+</style></head>
+<body><main>
+<header><p class="eyebrow">XHS Opportunity Kit</p><h1>${escapeHtml(title)}</h1><p class="scope">${escapeHtml(scope)}</p>
+<div class="stats"><span><b>${summary.match}</b>${escapeHtml(t.match)}</span><span><b>${summary.pending}</b>${escapeHtml(t.pending)}</span><span><b>${summary.excluded}</b>${escapeHtml(t.excluded)}</span><span><b>${items.length}</b>${escapeHtml(t.total)}</span><span><b>${summary.workModes.remote}</b>${escapeHtml(t.remoteCount)}</span><span><b>${summary.workModes.hybrid + summary.workModes.unknown}</b>${escapeHtml(t.remotePending)}</span><span><b>${summary.workModes.onsite}</b>${escapeHtml(t.onsiteCount)}</span></div></header>
+<section><h2>${escapeHtml(t.match)}</h2>${matches.length ? matches.map((item) => card(item, locale)).join("") : `<p>${escapeHtml(t.noMatch)}</p>`}</section>
+<section><h2>${escapeHtml(t.pending)}</h2>${pending.length ? pending.map((item) => card(item, locale)).join("") : `<p>${escapeHtml(t.noPending)}</p>`}</section>
+<section><h2>${escapeHtml(t.excluded)}</h2>${excludedReasons.length ? `<ul class="excluded-list">${excludedReasons.map((r) => `<li>${escapeHtml(reasonLabel(r.code, locale))}<span>${r.count}</span></li>`).join("")}</ul>` : `<p>${escapeHtml(t.noExcluded)}</p>`}</section>
+<details><summary>${escapeHtml(t.technical)}</summary><pre>${technical}</pre></details>
+<footer>${escapeHtml(t.footer)}<br>${escapeHtml(t.generated)}: ${escapeHtml(generatedAt)}</footer>
+</main></body></html>`;
+  return { html, summary, items };
+}
+function createDemoReport() {
+  const store2 = new OpportunityStore(":memory:");
+  try {
+    const now = Date.now();
+    const observedAt = new Date(now).toISOString();
+    const publishedAt = new Date(now - 2 * 864e5).toISOString();
+    const notes = [
+      {
+        id: "demo-remote-001",
+        title: "\u793A\u4F8B\uFF1A\u8FDC\u7A0B\u77ED\u89C6\u9891\u526A\u8F91\uFF08\u7F8E\u5986\u7C7B\uFF09",
+        body: "\u793A\u4F8B\u6570\u636E\uFF1A\u62DB\u8FDC\u7A0B\u526A\u8F91\uFF0C15 \u5143/\u6761\uFF0C50 \u79D2\u5185\uFF0C\u6BCF\u6708 400 \u6761\u8D77\uFF0C\u957F\u671F\u5408\u4F5C\u3002",
+        publishedAt,
+        observedAt
+      },
+      {
+        id: "demo-remote-002",
+        title: "\u793A\u4F8B\uFF1A\u8FDC\u7A0B\u76F4\u64AD\u5207\u7247\u526A\u8F91",
+        body: "\u793A\u4F8B\u6570\u636E\uFF1A\u6296\u97F3\u76F4\u64AD\u5207\u7247\uFF0C\u5168\u7A0B\u8FDC\u7A0B\uFF0C15\u201325 \u5143/\u6761\uFF0C\u6BCF\u5929\u81F3\u5C11 2 \u6761\u3002",
+        publishedAt,
+        observedAt
+      },
+      {
+        id: "demo-remote-003",
+        title: "\u793A\u4F8B\uFF1A\u526A\u8F91\u957F\u671F\u5408\u4F5C\uFF08\u672A\u5199\u5730\u70B9\uFF09",
+        body: "\u793A\u4F8B\u6570\u636E\uFF1A\u62DB\u957F\u671F\u526A\u8F91\uFF0C\u6309\u5E02\u573A\u4EF7\uFF0C\u5177\u4F53\u6C9F\u901A\u3002",
+        publishedAt,
+        observedAt
+      },
+      {
+        id: "demo-onsite-001",
+        title: "\u793A\u4F8B\uFF1A\u5317\u4EAC\u5750\u73ED\u526A\u8F91",
+        body: "\u793A\u4F8B\u6570\u636E\uFF1A\u5317\u4EAC\u526A\u8F91\u5C97\u4F4D\uFF0C\u9700\u6BCF\u5468\u5230\u5C97 3 \u5929\uFF0C\u5750\u73ED\u3002",
+        publishedAt,
+        observedAt
+      },
+      {
+        id: "demo-recruiter-001",
+        title: "\u793A\u4F8B\uFF1A\u62DB\u52DF\u526A\u8F91\u63A5\u5355\u4EE3\u7406",
+        body: "\u793A\u4F8B\u6570\u636E\uFF1A\u62DB\u52DF\u526A\u8F91\u63A5\u5355\u4EE3\u7406\uFF0C\u52A0\u5165\u524D\u9700\u4EA4\u57F9\u8BAD\u8D39\u3002",
+        publishedAt,
+        observedAt
+      }
+    ];
+    store2.ingest(notes);
+    const review = (id, data) => {
+      const key = `xiaohongshu:${id}`;
+      const o = store2.get(key);
+      if (!o || !o.evidence[0]) throw new Error(`Demo note missing: ${id}`);
+      store2.review(key, { reviewer: "demo", currency: "CNY", evidenceIds: [o.evidence[0].id], ...data });
+    };
+    review("demo-remote-001", {
+      decision: "priority",
+      reason: "\u793A\u4F8B\uFF1A\u8FDC\u7A0B\u660E\u786E\uFF0C\u5355\u4EF7\u548C\u91CF\u90FD\u5199\u6E05\u695A",
+      workMode: "remote",
+      demandType: "buyer",
+      rate: { min: 15, max: 15, unit: "per_item", volume: "400 \u6761/\u6708" },
+      budget: 6e3,
+      riskFlags: []
+    });
+    review("demo-remote-002", {
+      decision: "priority",
+      reason: "\u793A\u4F8B\uFF1A\u8FDC\u7A0B\u660E\u786E\uFF0C\u5355\u4EF7\u533A\u95F4\u548C\u6BCF\u65E5\u91CF\u90FD\u5199\u6E05\u695A",
+      workMode: "remote",
+      demandType: "agency",
+      rate: { min: 15, max: 25, unit: "per_item", volume: "\u6BCF\u5929 2 \u6761" },
+      budget: 1500,
+      riskFlags: ["agency_cut"]
+    });
+    review("demo-remote-003", {
+      decision: "pending",
+      reason: "\u793A\u4F8B\uFF1A\u6CA1\u5199\u5730\u70B9\uFF0C\u5355\u4EF7\u4E5F\u672A\u8BF4\u660E",
+      workMode: "unknown",
+      demandType: "unknown",
+      riskFlags: ["unclear_rate"]
+    });
+    review("demo-onsite-001", {
+      decision: "priority",
+      reason: "\u793A\u4F8B\uFF1A\u8981\u6C42\u6BCF\u5468\u5230\u5C97 3 \u5929",
+      workMode: "onsite",
+      demandType: "buyer",
+      rate: { min: 200, max: 200, unit: "per_day" },
+      budget: 4e3,
+      riskFlags: []
+    });
+    review("demo-recruiter-001", {
+      decision: "priority",
+      reason: "\u793A\u4F8B\uFF1A\u62DB\u52DF\u4EE3\u7406\u5E76\u6536\u57F9\u8BAD\u8D39",
+      workMode: "remote",
+      demandType: "recruiter",
+      riskFlags: ["training_fee", "unclear_rate"]
+    });
+    const criteria = { requireRemote: true, maxAgeDays: 30, excludeRiskFlags: ["training_fee"] };
+    const result = buildReport(store2.list({ limit: 100 }), {
+      title: "\u793A\u4F8B\uFF1A\u8FDC\u7A0B\u63A5\u5355\u673A\u4F1A",
+      scope: "\u5408\u6210\u793A\u4F8B\u6570\u636E\uFF0C\u4EC5\u7528\u4E8E\u6F14\u793A\uFF1B\u4E0D\u662F\u771F\u5B9E\u7EBF\u7D22\u3002",
+      criteria,
+      now
+    });
+    return { html: result.html, summary: result.summary, count: result.items.length, criteria };
+  } finally {
+    store2.close();
+  }
 }
 
 // src/api.ts
@@ -22150,7 +22682,19 @@ var commandSchemas = {
   review: external_exports.object({ key: external_exports.string().min(1), review: reviewSchema }).strict(),
   stage: external_exports.object({ key: external_exports.string().min(1), stage: stageSchema, reason: external_exports.string().min(1) }).strict(),
   screen: external_exports.object({ criteria: filterSchema.default({}), selection: listSchema.default({}) }).strict(),
-  export: external_exports.object({ format: external_exports.enum(["json", "csv"]).default("json"), selection: listSchema.default({}) }).strict(),
+  export: external_exports.object({
+    format: external_exports.enum(["json", "csv"]).default("json"),
+    header: external_exports.enum(["en", "zh"]).default("en"),
+    selection: listSchema.default({})
+  }).strict(),
+  report: external_exports.object({
+    title: external_exports.string().max(200).optional(),
+    scope: external_exports.string().max(500).optional(),
+    criteria: filterSchema.default({}),
+    selection: listSchema.default({}),
+    locale: external_exports.enum(["zh", "en"]).default("zh")
+  }).strict(),
+  demo: external_exports.object({}).strict(),
   collect: external_exports.object({ options: collectSchema, provider: providerConfigSchema.optional() }).strict(),
   run: external_exports.object({ id: external_exports.string().min(1) }).strict(),
   doctor: external_exports.object({}).strict()
@@ -22167,7 +22711,14 @@ async function execute(store2, command, input, provider) {
       const p = commandSchemas.show.parse(input);
       const item = store2.get(p.key);
       if (!item) throw new KitError("NOT_FOUND", "Opportunity not found.");
-      return { item, events: store2.events(p.key) };
+      const quotes = item.evidence.slice(0, 10).map((e) => ({
+        id: e.id,
+        kind: e.kind,
+        text: e.text.slice(0, 1e3),
+        observedAt: e.observedAt,
+        ...e.reference ? { reference: e.reference } : {}
+      }));
+      return { item, events: store2.events(p.key), quotes };
     }
     case "review": {
       const p = commandSchemas.review.parse(input);
@@ -22179,12 +22730,19 @@ async function execute(store2, command, input, provider) {
     }
     case "screen": {
       const p = commandSchemas.screen.parse(input);
-      return { items: store2.list(p.selection).map((o) => screen(o, p.criteria)), selection: p.selection };
+      const items = store2.list(p.selection).map((o) => screen(o, p.criteria));
+      return { items, summary: summarizeScreen(items), criteria: p.criteria, selection: p.selection };
     }
     case "export": {
       const p = commandSchemas.export.parse(input);
       const rows = store2.list(p.selection);
-      return { format: p.format, count: rows.length, selection: p.selection, data: p.format === "csv" ? exportCsv(rows) : exportJson(rows) };
+      return {
+        format: p.format,
+        header: p.header,
+        count: rows.length,
+        selection: p.selection,
+        data: p.format === "csv" ? exportCsv(rows, p.header) : exportJson(rows)
+      };
     }
     case "collect": {
       const p = commandSchemas.collect.parse(input);
@@ -22197,24 +22755,63 @@ async function execute(store2, command, input, provider) {
         if (owned) await active.close?.();
       }
     }
+    case "report": {
+      const p = commandSchemas.report.parse(input);
+      const rows = store2.list(p.selection);
+      const report = buildReport(rows, { title: p.title, scope: p.scope, criteria: p.criteria, locale: p.locale });
+      return {
+        format: "html",
+        count: rows.length,
+        selection: p.selection,
+        criteria: p.criteria,
+        summary: report.summary,
+        data: report.html
+      };
+    }
+    case "demo": {
+      commandSchemas.demo.parse(input);
+      const demo = createDemoReport();
+      return {
+        format: "html",
+        demo: true,
+        count: demo.count,
+        criteria: demo.criteria,
+        summary: demo.summary,
+        data: demo.html
+      };
+    }
     case "run": {
       const p = commandSchemas.run.parse(input);
       const run = store2.getRun(p.id);
       if (!run) throw new KitError("NOT_FOUND", "Run not found.");
       return run;
     }
-    case "doctor":
+    case "doctor": {
       commandSchemas.doctor.parse(input);
+      const records = store2.count();
+      const providerConfigured = !!provider;
       return {
         version: "0.1.0",
         node: process.version,
         storage: "sqlite",
-        records: store2.count(),
-        providerConfigured: !!provider,
-        capabilities: ["import", "collect", "review", "screen", "export", "stage"],
+        records,
+        providerConfigured,
+        capabilities: ["import", "collect", "review", "screen", "export", "stage", "report", "demo"],
         sendsMessages: false,
-        startsScheduler: false
+        startsScheduler: false,
+        checks: [
+          { id: "storage", status: "ok", detail: `SQLite ready; ${records} record(s).` },
+          {
+            id: "provider",
+            status: providerConfigured ? "ok" : "attention",
+            detail: providerConfigured ? "Configured; platform login is not verified." : "Not configured; import, review and export still work. Live collect needs a provider."
+          },
+          { id: "runtime", status: "ok", detail: `Node ${process.version}.` },
+          { id: "outbound", status: "info", detail: "No messaging or scheduler." }
+        ],
+        summary: `${records} local record(s). ${providerConfigured ? "Provider configured" : "Provider not configured"}. No messaging or scheduler.`
       };
+    }
     default:
       throw new KitError("UNKNOWN_COMMAND", "Unknown command.");
   }
@@ -22272,20 +22869,24 @@ try {
       version: "0.1.0",
       usage: "xhs-opportunity <command> [--db PATH] [--input FILE|-] [--output FILE]",
       commands: Object.keys(commandSchemas),
-      help: "See docs/cli.md. Every response is JSON. --output is only for export and never overwrites files."
+      help: "See docs/cli.md. Every response is JSON. --output is for export, report and demo; it never overwrites files."
     }));
   } else {
     if (positionals.length !== 1 || !Object.hasOwn(commandSchemas, positionals[0])) throw new KitError("UNKNOWN_COMMAND", "Use --help for supported commands.");
     const command = positionals[0];
-    if (values.output && command !== "export") throw new KitError("INVALID_OPTION", "--output is only supported by export.");
+    const outputCommands = /* @__PURE__ */ new Set(["export", "report", "demo"]);
+    if (values.output && !outputCommands.has(command)) throw new KitError("INVALID_OPTION", "--output is only supported by export, report and demo.");
     const input = await readInput(values.input);
-    store = new OpportunityStore(values.db || defaultDatabasePath());
+    store = new OpportunityStore(command === "demo" ? ":memory:" : values.db || defaultDatabasePath());
     const result = await execute(store, command, input);
     let data = result;
     if (values.output) {
       const exported = result;
       await writeFile(values.output, exported.data, { encoding: "utf8", flag: "wx", mode: 384 });
-      data = { format: exported.format, count: exported.count, path: values.output };
+      data = { format: exported.format, count: exported.count, path: values.output, ...exported.summary ? { summary: exported.summary } : {} };
+    } else if (command === "report" || command === "demo") {
+      const { data: html, ...rest } = result;
+      data = { ...rest, htmlLength: html.length, hint: "Use --output FILE to write the HTML report." };
     }
     console.log(JSON.stringify({ ok: true, data }));
     if (command === "collect" && result.status !== "complete") process.exitCode = 3;

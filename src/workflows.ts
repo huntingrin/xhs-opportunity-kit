@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { KitError, publicError, timestamp, type Opportunity } from './model.js';
+import { KitError, publicError, rateUnitSchema, riskFlagSchema, timestamp,
+  type DemandType, type Opportunity, type Rate, type RiskFlag, type WorkMode } from './model.js';
 import { OpportunityStore } from './store.js';
 import { type OpportunityProvider } from './providers.js';
 
@@ -71,12 +72,35 @@ export async function collect(store: OpportunityStore, provider: OpportunityProv
 
 export const filterSchema = z.object({
   query: z.string().optional(), publishedFrom: timestamp.optional(), publishedTo: timestamp.optional(),
+  maxAgeDays: z.number().int().min(1).max(3650).optional(),
+  requireRemote: z.boolean().default(false),
   requireAiAccepted: z.boolean().default(false), minBudget: z.number().nonnegative().optional(),
+  minRate: z.number().nonnegative().optional(), rateUnit: rateUnitSchema.optional(),
   currency: z.string().length(3).default('CNY'), excludeSellers: z.boolean().default(true),
-}).strict().refine(v => !v.publishedFrom || !v.publishedTo || Date.parse(v.publishedFrom) <= Date.parse(v.publishedTo), 'Date range is reversed.');
-export function screen(opportunity: Opportunity, criteria: z.input<typeof filterSchema>): { key: string; result: 'match' | 'pending' | 'excluded'; reasons: string[] } {
+  excludeIntermediaries: z.boolean().default(false),
+  excludeRiskFlags: z.array(riskFlagSchema).max(20).default([]),
+}).strict()
+  .refine(v => !v.publishedFrom || !v.publishedTo || Date.parse(v.publishedFrom) <= Date.parse(v.publishedTo), 'Date range is reversed.')
+  .refine(v => v.minRate === undefined || v.rateUnit !== undefined, 'rateUnit is required when minRate is set.');
+export interface ScreenResult {
+  key: string; title: string; url: string; stage: string; publishedAt: string | null;
+  workMode: WorkMode; demandType: DemandType; riskFlags: RiskFlag[];
+  result: 'match' | 'pending' | 'excluded'; reasons: string[];
+  quote: string | null; reviewReason: string; rate: Rate | null;
+  budget: number | null; currency: string;
+}
+export interface ScreenSummary {
+  match: number; pending: number; excluded: number;
+  reasons: Record<string, number>;
+  workModes: Record<WorkMode, number>;
+  riskFlags: Partial<Record<RiskFlag, number>>;
+}
+export function screen(opportunity: Opportunity, criteria: z.input<typeof filterSchema>, now = Date.now()): ScreenResult {
   const c = filterSchema.parse(criteria); const reasons: string[] = []; let excluded = false;
   const o = opportunity; const review = o.reviewStale ? null : o.review;
+  const workMode: WorkMode = review?.workMode ?? 'unknown';
+  const demandType: DemandType = review?.demandType ?? 'unknown';
+  const riskFlags: RiskFlag[] = review?.riskFlags ?? [];
   if (o.reviewStale) reasons.push('REVIEW_STALE');
   if (review?.decision === 'excluded' || o.stage === 'closed') { excluded = true; reasons.push('EXCLUDED_OR_CLOSED'); }
   if (c.query && !`${o.note.title}\n${o.note.body}`.toLocaleLowerCase().includes(c.query.toLocaleLowerCase())) { excluded = true; reasons.push('QUERY_MISMATCH'); }
@@ -85,8 +109,19 @@ export function screen(opportunity: Opportunity, criteria: z.input<typeof filter
     else if ((c.publishedFrom && Date.parse(o.note.publishedAt) < Date.parse(c.publishedFrom)) ||
       (c.publishedTo && Date.parse(o.note.publishedAt) > Date.parse(c.publishedTo))) { excluded = true; reasons.push('OUTSIDE_DATE_RANGE'); }
   }
-  if (c.excludeSellers && review?.demandType === 'seller') { excluded = true; reasons.push('SELLER'); }
-  else if (!review || review.demandType === 'unknown') reasons.push('DEMAND_UNVERIFIED');
+  if (c.maxAgeDays !== undefined) {
+    if (!o.note.publishedAt) { if (!reasons.includes('DATE_UNKNOWN')) reasons.push('DATE_UNKNOWN'); }
+    else if (now - Date.parse(o.note.publishedAt) > c.maxAgeDays * 86_400_000) { excluded = true; reasons.push('TOO_OLD'); }
+  }
+  if (c.requireRemote) {
+    if (workMode === 'onsite') { excluded = true; reasons.push('ONSITE'); }
+    else if (workMode === 'hybrid') reasons.push('HYBRID');
+    else if (workMode !== 'remote') reasons.push('REMOTE_UNVERIFIED');
+  }
+  if (c.excludeSellers && demandType === 'seller') { excluded = true; reasons.push('SELLER'); }
+  else if (!review || demandType === 'unknown') reasons.push('DEMAND_UNVERIFIED');
+  if (c.excludeIntermediaries && (demandType === 'agency' || demandType === 'recruiter')) { excluded = true; reasons.push('INTERMEDIARY'); }
+  if (c.excludeRiskFlags.length && riskFlags.some(flag => c.excludeRiskFlags.includes(flag))) { excluded = true; reasons.push('RISK_FLAG'); }
   if (c.requireAiAccepted) {
     if (review?.aiAcceptance === 'rejected') { excluded = true; reasons.push('AI_REJECTED'); }
     else if (review?.aiAcceptance !== 'accepted') reasons.push('AI_ACCEPTANCE_UNKNOWN');
@@ -96,6 +131,35 @@ export function screen(opportunity: Opportunity, criteria: z.input<typeof filter
     else if (review.currency !== c.currency) reasons.push('CURRENCY_MISMATCH');
     else if (review.budget < c.minBudget) { excluded = true; reasons.push('BUDGET_TOO_LOW'); }
   }
+  if (c.minRate !== undefined) {
+    const rate = review?.rate;
+    if (!rate) reasons.push('RATE_UNKNOWN');
+    else if (c.rateUnit && rate.unit !== c.rateUnit) reasons.push('RATE_UNIT_MISMATCH');
+    else if (rate.max == null) {
+      // An open-ended rate has no known top; a below-floor minimum stays pending.
+      if (rate.min < c.minRate) reasons.push('RATE_RANGE');
+    } else if (rate.max < c.minRate) { excluded = true; reasons.push('RATE_TOO_LOW'); }
+    else if (rate.min < c.minRate) reasons.push('RATE_RANGE');
+  }
   if (review?.decision === 'pending') reasons.push('REVIEW_PENDING');
-  return { key: o.key, result: excluded ? 'excluded' : reasons.length ? 'pending' : 'match', reasons };
+  const quote = (o.evidence.find(e => e.kind === 'note') ?? o.evidence[0])?.text ?? null;
+  return {
+    key: o.key, title: o.note.title, url: o.url, stage: o.stage, publishedAt: o.note.publishedAt,
+    workMode, demandType, riskFlags,
+    result: excluded ? 'excluded' : reasons.length ? 'pending' : 'match', reasons: [...new Set(reasons)],
+    quote: quote ? quote.slice(0, 500) : null,
+    reviewReason: review?.reason ?? '', rate: review?.rate ?? null,
+    budget: review?.budget ?? null, currency: review?.currency ?? 'CNY',
+  };
+}
+export function summarizeScreen(items: ScreenResult[]): ScreenSummary {
+  const summary: ScreenSummary = { match: 0, pending: 0, excluded: 0, reasons: {},
+    workModes: { remote: 0, hybrid: 0, onsite: 0, unknown: 0 }, riskFlags: {} };
+  for (const item of items) {
+    summary[item.result]++;
+    for (const reason of new Set(item.reasons)) summary.reasons[reason] = (summary.reasons[reason] ?? 0) + 1;
+    summary.workModes[item.workMode]++;
+    for (const flag of new Set(item.riskFlags)) summary.riskFlags[flag] = (summary.riskFlags[flag] ?? 0) + 1;
+  }
+  return summary;
 }

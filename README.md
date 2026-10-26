@@ -1,126 +1,146 @@
 # XHS Opportunity Kit
 
-把小红书上的潜在线索整理成有来源、有判断依据、可持续跟进的合作机会。
+**帮你在小红书上找远程接单机会，先看 3 条，再决定联系谁。**
 
-**TypeScript SDK + JSON CLI + 标准 stdio MCP 服务 + 通用 Agent Skill。** 本地 SQLite 保存状态，支持离线导入与可配置的小红书 MCP 连接。与小红书无官方关联。
+不用自己翻几百条笔记。它把公开的接单需求去重，按你的活类型、单价底线和时间筛一遍；每条都带原帖原话、要确认的问题和风险提示。
 
-第一版覆盖：搜索与详情读取、笔记去重、证据保存、人工/Agent 判断、规则筛选、业务状态记录、JSON/CSV 导出。它不发送消息、不发布内容、不自动接单，也不创建后台定时任务。
+与小红书无官方关联；只读取公开内容，不登录、不私信、不自动接单。
 
-## 安装
+## 适合谁
 
-需要 **Node.js 22.13 或以上**。使用 Node 内置 SQLite，无需另外安装数据库。部分 Node 版本会向 stderr 输出 SQLite 实验性提示，stdout 仍是纯 JSON。
+- 接远程活的自由职业者：剪辑、设计、写作、配音、运营、翻译……
+- 想接单，但不想被“招募代理 / 卖课 / 坐班 / 收费试稿”浪费时间
+- 已经在用支持 Skill、MCP 或命令行的 Agent
 
-### 方式一：直接用技能目录里的单文件 CLI（无需任何安装）
+## 你会得到什么
 
-`skills/xhs-opportunity-kit/scripts/` 下的两个入口是**已内联依赖的构建产物**，只需 Node，不需 npm 安装、不产生 node_modules、可离线运行：
+先给 3 条最值得联系的，而不是一张几百行的表：
+
+> **远程（明确）｜示例：远程短视频剪辑**
+> 15 元/条 · 50 秒 · 每月 400 条起
+>
+> 原话：“招远程剪辑，15 元/条，50 秒内，长期稳定，月结。”
+>
+> 为什么适合：单价、工作量、交付时长都写清楚
+>
+> 先确认：是否直签 / 试稿 / 押金 / 结算周期
+>
+> 风险：招募方可能抽成
+>
+> 下一步：打开原帖 / 复制开场白 / 标记已联系
+
+信息不够的放“值得问一句”；要求坐班、到岗的直接排除。需要时还能导出 CSV，或生成一份本地 HTML 报告。
+
+先给 3 条，是因为你要的是能联系的活，不是一张需要自己再筛一遍的表。
+
+## 怎么用（推荐）
+
+### 1. 在 Agent 里加载这个 Skill
+
+最简单：从 [ColaSkill](https://colaskill.com/zh/xhs-opportunity-kit/) 安装。手动安装的话，把 `skills/xhs-opportunity-kit/` 放进你的 Agent 技能目录。
+
+技能目录里已经带了单文件 CLI（`skills/xhs-opportunity-kit/scripts/xhs-opportunity.mjs`；仓库和技能包版本自带，npm 包可能不含打包脚本），只要 Node，不需要 npm 安装；如果你的 Agent 能执行命令，可以直接用它。它只是操作指南，不会替你登录小红书；登录和验证由你本人处理。
+
+### 2. 对 Agent 说
+
+> 帮我找远程剪辑单，单价不低于 15 元/条，每天能投入 3 小时。先给我 3 条最值得看的。
+
+它会先确认 3 件事：接什么活、单价或月收入底线、每天能投入多少。然后只看首屏 10–12 条，先给你 3 条；你挑靠谱的，它再扩。
+
+### 3. 选一条开始联系
+
+每条线索都带原帖链接和要确认的问题。这个包不会替你发私信，也不会自动接单；发送由你本人操作。
+
+## 它不会做什么
+
+- 不登录你的小红书账号，不绕过验证码
+- 不私信、不发布、不自动接单、不创建定时任务
+- 不保证搜全：小红书搜索没有完整翻页保证，报告会写清这次看了多少、缺什么
+- 不替你判断对方是不是骗子；押金、培训费、免费试稿等风险会标出来，但要不要继续由你决定
+
+## 远程规则
+
+- 只把明确写“全程远程 / 线上办公 / 居家 / 不限地点 / 可异地”的放进“建议先联系”
+- “可远程 / 远程优先 / 没写地点”放“值得问一句”
+- 要求坐班、到岗、驻场、每周固定线下的直接排除
+- 发布者所在地不是工作地点；“山东的作者”不等于“山东坐班”
+
+## 数据与隐私
+
+- 记录默认存在你电脑的应用数据目录，不写进项目文件夹；技术用户可以用 `--db` 指定位置
+- 只保存规范化字段，不保存 Cookie、访问令牌或带签名的链接
+- 正文、作者、评论可能包含个人信息；导出前按你的使用场景审阅
+- 仓库里的示例和测试全部是合成数据
+
+## 如果你会用命令行
+
+需要 Node.js 22.13 或以上。
+
+### 方式一：不安装，直接用技能目录里的单文件 CLI
+
+`skills/xhs-opportunity-kit/scripts/` 下的两个入口已经内联依赖，只需 Node，不需要 npm 安装，也不会产生 `node_modules`：
 
 ```sh
 node skills/xhs-opportunity-kit/scripts/xhs-opportunity.mjs doctor
 node skills/xhs-opportunity-kit/scripts/xhs-opportunity-mcp.mjs --db /absolute/path/to/opportunities.sqlite
 ```
 
-它们由 `npm run bundle:skill` 生成并随仓库提交，见 [Agent Skill](skills/xhs-opportunity-kit/SKILL.md) 与 [第三方声明](skills/xhs-opportunity-kit/THIRD-PARTY.md)。
+它们由 `npm run bundle:skill` 生成并随仓库提交。改过 `src/` 后需要重新生成。
 
-### 方式二：安装 GitHub Release 中的已编译包
-
-```sh
-curl -L -o huntingrin-xhs-opportunity-kit-0.1.0.tgz \
-  https://github.com/huntingrin/xhs-opportunity-kit/releases/download/v0.1.0/huntingrin-xhs-opportunity-kit-0.1.0.tgz
-npm install -g ./huntingrin-xhs-opportunity-kit-0.1.0.tgz
-xhs-opportunity --help
-xhs-opportunity doctor
-```
-
-**先下载再本地安装，是因为 npm 12 默认拒绝直接安装远程 URL**（`allow-remote` 默认为 `none`，会报 `EALLOWREMOTE`）。旧版 npm 可以直接 `npm install -g <上面的 tgz URL>`；也可以给 npm 12 加 `--allow-remote` 放行。发布包内已含编译好的 `dist/`，安装脚本被策略拦截（npm 12 默认拦 `prepare`）不影响使用。同目录的 `SHA256SUMS` 可用于校验下载。
-
-### 方式三：源码开发
+### 方式二：源码开发
 
 ```sh
 git clone https://github.com/huntingrin/xhs-opportunity-kit.git
 cd xhs-opportunity-kit
 npm ci
-npm test
-node examples/quickstart.mjs
-npm run bundle:skill   # 改过 src/ 后重新生成技能内置入口
+npm run build
+
+node dist/cli.js demo --output demo.html   # 先看合成示例，不碰你的数据
+node dist/cli.js doctor
 ```
 
-目前通过 GitHub 分发，**尚未发布 npm registry 包**。不要使用 `npm install @huntingrin/xhs-opportunity-kit`，除非你确认它日后已在 registry 发布。其他 Node 项目可以 `npm install <上面的 tgz URL>` 后导入同名 SDK。
+### 方式三：安装 v0.1.0 Release（不含新命令）
 
-## 任何 Agent 如何使用
+```sh
+curl -L -o huntingrin-xhs-opportunity-kit-0.1.0.tgz \
+  https://github.com/huntingrin/xhs-opportunity-kit/releases/download/v0.1.0/huntingrin-xhs-opportunity-kit-0.1.0.tgz
+npm install -g ./huntingrin-xhs-opportunity-kit-0.1.0.tgz
+xhs-opportunity doctor
+```
+
+npm 12 默认拒绝直接安装远程 URL（`EALLOWREMOTE`）；先下载再本地安装即可。旧版 npm 可以直接 `npm install -g <tgz URL>`，或给 npm 12 加 `--allow-remote`。
+
+真实搜索需要你配置一个可用的 MCP 连接，或者让 Agent 读取小红书后把笔记导入。配置见 [提供器接口](docs/providers.md)。
+
+## 给开发者 / 集成
+
+这个仓库同时提供：
+
+- TypeScript SDK
+- JSON CLI（`xhs-opportunity`）
+- 标准 stdio MCP 服务（`xhs-opportunity-mcp`，12 个工具）
+- 通用 Agent Skill（`skills/xhs-opportunity-kit/SKILL.md`）
+- 技能目录内已内联依赖的单文件 CLI / MCP 入口
 
 | 环境能力 | 接入方式 |
 | --- | --- |
-| 能执行命令 | 调用 `xhs-opportunity`，或技能目录里的单文件 CLI，通过文件或 stdin 传 JSON，解析 JSON 结果 |
-| 支持 MCP | 启动 `xhs-opportunity-mcp`，或在技能目录里用 `node scripts/xhs-opportunity-mcp.mjs`，发现并调用 10 个标准工具 |
+| 支持 Skill | 加载 `skills/xhs-opportunity-kit/SKILL.md` |
+| 能执行命令 | 调用 `xhs-opportunity`，或技能目录里的单文件 CLI |
+| 支持 MCP | 启动 `xhs-opportunity-mcp` |
 | 能运行 JS/TS | 导入 SDK，注入自己的数据提供器 |
-| 支持 Skill | 加载 `skills/xhs-opportunity-kit/SKILL.md`，作为工作流指南；包内 CLI 可直接运行 |
-| 只有聊天、不能调用工具 | 不能直接执行本项目；需由宿主提供以上一种执行能力 |
+| 只有聊天、不能调用工具 | 不能直接执行本项目；需由宿主提供以上一种能力 |
 
-CLI 是跨 Agent 的基础入口；Skill 不绑定 Codex、Cola 或特定模型。小红书登录和连接需要由使用者自行配置，不随安装包分发。没有平台连接也能处理已有数据。
-
-## 五分钟离线演示
-
-仓库中的示例全部为虚构数据。以下命令从仓库根目录执行：
+常用命令：
 
 ```sh
-node dist/cli.js collect --db ./demo.sqlite --input examples/collect-file.json
-node dist/cli.js list --db ./demo.sqlite
-node dist/cli.js export --db ./demo.sqlite --input examples/export-csv.json --output ./demo.csv
+npm run check
+npm test
+npm run bundle:skill     # 重新生成技能内置入口
+npm run check:bundle     # 校验内置入口与源码同步
+npm pack
 ```
 
-输出始终为 `{ "ok": true, "data": ... }` 或 `{ "ok": false, "error": { "code": ..., "message": ... } }`。
-
-- 退出码 `0`：操作成功；`1`：错误；`3`：采集部分完成或失败，检查 `data.status/errors/warnings`。部分结果已经保存。
-- 真实小红书搜索端点没有完整结果范围保证，因此正常采集也可能是 `partial`。不要把它改报成“全部搜索完成”。
-- 重新执行同一采集不会重复新增同一笔记。进程中断后可重跑；已保存数据保留，中断运行可能保留 `running` 状态，须结合进程状态判断。不会自动重放旧游标。
-
-## 接入真实搜索
-
-复制 `examples/collect-mcp.json`，在仓库外填写你实际可访问的 MCP URL。认证令牌通过环境变量传入。也支持 stdio 与 SSE，见 [提供器接口](docs/providers.md)。
-
-```sh
-xhs-opportunity collect --input /path/to/your/collect-config.json
-```
-
-适配器调用 `search_feeds` 和 `get_feed_detail`。平台搜索、访问资格、登录和限流由上游工具处理。SDK 不提供账号、浏览器或登录状态，也不保证上游一直可用。
-
-Agent 已经能读取小红书、但不能让本包直接连接同一工具时，可以使用自己的已授权工具收集内容，转换成 [标准 Note 数据](docs/api.md)，调用 `import`。无需重新实现登录。
-
-## MCP 配置
-
-通用配置结构如下，具体放置位置遵循你的 Agent 客户端说明：
-
-```json
-{
-  "mcpServers": {
-    "xhs-opportunity-kit": {
-      "command": "xhs-opportunity-mcp",
-      "args": ["--db", "/absolute/path/to/opportunities.sqlite"]
-    }
-  }
-}
-```
-
-如客户端找不到全局可执行文件，可用 `node` 配合已构建项目的绝对路径 `dist/mcp-server.js`。需要 MCP 工具直接采集时，在启动参数增加 `--provider /absolute/path/to/provider.local.json`。配置只包含 provider 对象，示例见 `examples/provider-mcp.json`。
-
-## 证据和状态
-
-- 筛选等级 `priority / pending / excluded` 与业务阶段 `discovered / contacted / requirements_review / accepted / delivered / closed` 分开保存。
-- `review` 必须引用 `show` 返回的证据 ID。未知预算、未知 AI 接受度不会自动判为符合要求。
-- 原帖内容更新会标记 `reviewStale`；规则筛选不继续使用过期判断。
-- `stage` 仅记录已发生的事实，不会真的联系客户或交付文件。
-- 从旧的 `lead-delivery.json` 导入时，旧结论保存为历史证据，进入待复核状态，不当成当前有效客户。
-- 搜索卡片不会覆盖已有详情。时间、评论覆盖范围、部分失败会保留。
-
-## 数据与依赖
-
-默认数据库放在系统用户数据目录下的 `xhs-opportunity-kit/`，不写入安装目录。可用 `XHS_OPPORTUNITY_DATA_DIR` 或 `--db` 指定。`doctor` 不验证平台登录。
-
-本包只保存规范化字段，不保存原始响应中的 Cookie、访问令牌或带签名的 URL。正文、作者与评论仍可能包含个人信息，属于你的本地数据；导出前按你的使用场景审阅。示例、测试与发布包不含真实账户、线索或运行资料。
-
-现有截图表格中的图像文字可由宿主 OCR 后作为 `image_text` 证据导入。本版没有内置 OCR、LLM、私信收发、邮件轮询、网页界面或 Excel 排版引擎；这些可以通过适配器或上层应用扩展。
-
-## 文档与维护
+文档：
 
 - [CLI 请求和错误契约](docs/cli.md)
 - [SDK、数据模型和状态转换](docs/api.md)
@@ -128,13 +148,12 @@ Agent 已经能读取小红书、但不能让本包直接连接同一工具时�
 - [English quick start](docs/english.md)
 - [Agent Skill](skills/xhs-opportunity-kit/SKILL.md)
 
-```sh
-npm run check
-npm test
-npm run bundle:skill   # 重新生成技能内置入口与第三方声明
-npm pack
-```
+当前源码包含尚未发布的 0.2 功能（远程工作方式、单价/工作量/风险、CSV 中文表头、HTML 报告/示例）；v0.1.0 Release 和它对应的技能内置入口都不含这些命令。发布 0.2.0 前请从源码构建或使用本地打包。
 
-`skills/xhs-opportunity-kit/scripts/` 与 `THIRD-PARTY.md` 是 `npm run bundle:skill` 的生成产物，**随仓库提交**（技能包没有安装步骤，必须自带依赖）。改过 `src/` 后请重新生成并一并提交；`npm run check:bundle` 会校验产物是否与源码同步。
+## 和平台的关系
 
-合成测试覆盖核心业务行为、CLI 子进程和真实 MCP 协议连接。CI 验证 Linux / macOS / Windows 与多个 Node 版本。线上功能是否可用仍取决于使用者的 MCP 服务与平台会话。MIT License。
+本项目与小红书无官方关联，不提供账号、登录状态或平台授权。请遵守平台规则，不要高频抓取。登录、验证码和账号安全由你本人处理。
+
+问题、建议或想加自己的筛选条件：[GitHub Issues](https://github.com/huntingrin/xhs-opportunity-kit/issues)。
+
+MIT License.

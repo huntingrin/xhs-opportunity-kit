@@ -57,19 +57,22 @@ Evidence kinds: `note`, `comment`, `image_text`, `profile`, `historical_review`.
 ```json
 {
   "decision": "priority",
-  "reason": "原文明确提出需求并接受 AI",
+  "reason": "远程：明确。原文明确需要剪辑并给出单价",
   "evidenceIds": ["copy-an-actual-id-from-show"],
   "reviewer": "your-agent-or-user",
   "demandType": "buyer",
-  "aiAcceptance": "accepted",
-  "budget": 800,
+  "workMode": "remote",
+  "rate": { "min": 15, "max": 25, "unit": "per_item", "volume": "每天 2 条" },
+  "riskFlags": [],
+  "aiAcceptance": "unknown",
+  "budget": 1500,
   "currency": "CNY"
 }
 ```
 
-`demandType`: buyer/seller/unknown. `aiAcceptance`: accepted/rejected/unknown. Budget is a user/agent-reviewed numeric amount (null when unknown), not a claim automatically extracted by this package. The SDK validates referenced evidence belongs to the opportunity; it cannot prove a semantic judgment is correct. Agents should cite supporting evidence and preserve uncertainty. Reviews record a content snapshot hash; changes mark them stale.
+`demandType`: buyer/agency/recruiter/seller/unknown. `workMode`: remote/hybrid/onsite/unknown. `rate` keeps the original quote (`min`, optional `max`, `unit`, optional `volume`); units are `per_item`, `per_minute`, `per_hour`, `per_day`, `per_month`, `per_project` or `unknown`. Set `max` equal to `min` for a fixed rate; leave `max` null only when the top is unknown or open-ended. `budget` remains the comparable numeric amount (null when unknown or not convertible). `riskFlags` is a bounded vocabulary: `deposit`, `training_fee`, `unpaid_trial`, `unclear_rate`, `unrealistic_volume`, `off_platform_payment`, `account_access`, `stale_post`, `agency_cut`, `other`. `aiAcceptance`: accepted/rejected/unknown. The SDK validates referenced evidence belongs to the opportunity; it cannot prove a semantic judgment is correct. Agents should cite supporting evidence and preserve uncertainty. Reviews record a content snapshot hash; changes mark them stale. Reviews created before these fields existed are treated by screening and export as `workMode`/`demandType` unknown, `rate` null and no risk flags; re-review them before relying on the new filters.
 
-`screen(opportunity, criteria)` is deterministic and does not mutate reviews. Criteria: query, publishedFrom, publishedTo, requireAiAccepted, minBudget, currency, excludeSellers. Results are `match`, `pending`, or `excluded` with reason codes. A match means the selected criteria match recorded facts, not that the client has confirmed availability. No currency conversion is inferred.
+`screen(opportunity, criteria, now?)` is deterministic and does not mutate reviews. Criteria: query, publishedFrom, publishedTo, maxAgeDays, requireRemote, requireAiAccepted, minBudget, minRate, rateUnit, currency, excludeSellers, excludeIntermediaries, excludeRiskFlags. Results are `match`, `pending`, or `excluded` with reason codes. A match means the selected criteria match recorded facts, not that the client has confirmed availability. `requireRemote` treats `remote` as a pass, `hybrid` and `unknown` as pending, and `onsite` as excluded. `minRate` with `rateUnit` compares the recorded `rate`: a range crossing the floor is pending, a top below the floor is excluded, an open-ended rate below the floor is pending, a missing rate is pending, and a unit mismatch is pending. `maxAgeDays` uses the provided `now` (default: current time) and treats missing dates as unknown, not fresh. No currency conversion is inferred. The result includes readable `title`, `url`, `stage`, `publishedAt`, `workMode`, `demandType`, `riskFlags`, `quote`, `reviewReason`, `rate`, `budget` and `currency`. `summarizeScreen(items)` returns counts by result, reason, work mode and risk flag.
 
 ## Business stage transitions
 
@@ -90,7 +93,13 @@ Repeating the current stage is idempotent. Each actual transition and review add
 
 `importNotes(document)` supports a normalized array, `{notes}`, historical `{leads,excluded}`, historical `{searches,details}`, and this package's JSON export. Importing exported/historical data restores note content and historical judgment evidence, **not business stages, audit history or current approvals**. It is portable content import, not database restoration. For a full backup, close all connections and copy the SQLite database file.
 
-`exportJson(rows)` includes schemaVersion, exportedAt, and opportunities. `exportCsv(rows)` quotes CSV syntax and neutralizes common spreadsheet formula prefixes. Exported evidence and author text are local user data.
+`exportJson(rows)` includes schemaVersion, exportedAt, and opportunities. `exportCsv(rows, header)` accepts `header: 'en' | 'zh'` (default `en`), quotes CSV syntax, neutralizes common spreadsheet formula prefixes, and localizes common enum values into Chinese when `zh` is selected. CSV columns include `work_mode`, `demand_type`, `rate_min`, `rate_max`, `rate_unit`, `rate_volume` and `risk_flags`. Exported evidence and author text are local user data.
+
+`execute(store, 'show', { key })` returns the opportunity, audit events and `quotes`—the first readable evidence text snippets. `execute(store, 'screen', ...)` returns `items` plus `summary` counts.
+
+## Report and demo
+
+`buildReport(rows, { title, scope, criteria, locale, now })` returns a standalone HTML string and the screen summary. It is static: no scripts, no external assets, escaped text and canonical HTTPS links. `execute(store, 'report', { title, scope, criteria, selection, locale })` wraps it for CLI/MCP. `execute(store, 'demo', {})` builds a synthetic in-memory report (five obvious sample notes) and never opens or mutates the caller's database. The CLI writes either output with `--output FILE`; existing files are never overwritten.
 
 ## Run semantics
 
@@ -98,4 +107,4 @@ Repeating the current stage is idempotent. Each actual transition and review add
 
 Pages persist incrementally. Partial failures do not remove successful results. `complete` means the provider explicitly exhausted the configured queries; it does not assert that every platform-wide opportunity was found. An unsupported detail request, page budget exhaustion, unknown upstream coverage, timeout or failed detail yields `partial`. All search calls failing yields `failed`.
 
-Runs persist with `running` before work and a final status afterward. After a crash, check process status and restart a new run with the same bounded options. Ingestion deduplicates already-saved content. Automatic cursor resumption and message-processing idempotency are not implemented in v0.1.
+Runs persist with `running` before work and a final status afterward. After a crash, check process status and restart a new run with the same bounded options. Ingestion deduplicates already-saved content. Automatic cursor resumption and message-processing idempotency are not implemented.

@@ -30,19 +30,23 @@ try {
   } });
   if (values.help || values.version || !positionals.length) {
     console.log(JSON.stringify({ ok: true, version: '0.1.0', usage: 'xhs-opportunity <command> [--db PATH] [--input FILE|-] [--output FILE]',
-      commands: Object.keys(commandSchemas), help: 'See docs/cli.md. Every response is JSON. --output is only for export and never overwrites files.' }));
+      commands: Object.keys(commandSchemas), help: 'See docs/cli.md. Every response is JSON. --output is for export, report and demo; it never overwrites files.' }));
   } else {
     if (positionals.length !== 1 || !Object.hasOwn(commandSchemas, positionals[0])) throw new KitError('UNKNOWN_COMMAND', 'Use --help for supported commands.');
     const command = positionals[0] as Command;
-    if (values.output && command !== 'export') throw new KitError('INVALID_OPTION', '--output is only supported by export.');
+    const outputCommands = new Set<string>(['export', 'report', 'demo']);
+    if (values.output && !outputCommands.has(command)) throw new KitError('INVALID_OPTION', '--output is only supported by export, report and demo.');
     const input = await readInput(values.input);
-    store = new OpportunityStore(values.db || defaultDatabasePath());
+    store = new OpportunityStore(command === 'demo' ? ':memory:' : (values.db || defaultDatabasePath()));
     const result = await execute(store, command, input);
     let data = result;
     if (values.output) {
-      const exported = result as { format: string; count: number; data: string };
+      const exported = result as { format: string; count: number; data: string; summary?: unknown };
       await writeFile(values.output, exported.data, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
-      data = { format: exported.format, count: exported.count, path: values.output };
+      data = { format: exported.format, count: exported.count, path: values.output, ...(exported.summary ? { summary: exported.summary } : {}) };
+    } else if (command === 'report' || command === 'demo') {
+      const { data: html, ...rest } = result as { data: string } & Record<string, unknown>;
+      data = { ...rest, htmlLength: html.length, hint: 'Use --output FILE to write the HTML report.' };
     }
     console.log(JSON.stringify({ ok: true, data }));
     if (command === 'collect' && (result as { status: string }).status !== 'complete') process.exitCode = 3;
